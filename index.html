@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LocalNote Secure | GDPR-Ready</title>
+    <link rel="manifest" href="manifest.json">
+    <style>
+        :root {
+            --bg: #ffffff; --sidebar-bg: #f8f9fa; --accent: #1a73e8;
+            --text-main: #202124; --text-sub: #5f6368; --border: #dadce0;
+            --danger: #d93025; --success: #1e8e3e;
+        }
+
+        * { box-sizing: border-box; }
+        body, html { margin: 0; padding: 0; height: 100%; font-family: 'Segoe UI', system-ui, sans-serif; color: var(--text-main); overflow: hidden; }
+
+        /* App Layout */
+        #app-shell { display: grid; grid-template-columns: 300px 1fr; height: 100vh; transition: opacity 0.3s, filter 0.3s; }
+        .blur { filter: blur(8px); pointer-events: none; opacity: 0.6; }
+
+        /* Sidebar */
+        aside { background: var(--sidebar-bg); border-right: 1px solid var(--border); display: flex; flex-direction: column; padding: 16px; gap: 12px; }
+        .sidebar-label { font-size: 11px; font-weight: bold; color: var(--text-sub); text-transform: uppercase; margin-top: 10px; }
+        
+        #file-list { flex-grow: 1; overflow-y: auto; margin-top: 8px; }
+        .file-item { 
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 10px; border-radius: 6px; cursor: pointer; font-size: 14px; margin-bottom: 2px;
+        }
+        .file-item:hover { background: #e8eaed; }
+        .file-item.active { background: #e8f0fe; color: var(--accent); font-weight: 600; }
+        .remove-btn { color: #ccc; font-size: 18px; padding: 0 5px; transition: color 0.2s; }
+        .remove-btn:hover { color: var(--danger); }
+
+        /* Main Stage */
+        main { display: flex; flex-direction: column; background: var(--bg); position: relative; }
+        header { padding: 12px 24px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; background: white; z-index: 10; }
+        #conflict-bar { display: none; background: #fce8e6; color: var(--danger); padding: 10px; text-align: center; font-weight: bold; border-bottom: 1px solid #f5c2c7; }
+        
+        #editor { 
+            flex-grow: 1; border: none; outline: none; padding: 40px; 
+            font-size: 18px; line-height: 1.6; resize: none; font-family: 'Georgia', serif; 
+        }
+
+        /* Overlay & Cards */
+        .overlay { position: fixed; inset: 0; background: rgba(255,255,255,0.9); display: flex; align-items: center; justify-content: center; z-index: 1000; }
+        .card { background: white; padding: 40px; border-radius: 12px; box-shadow: 0 15px 35px rgba(0,0,0,0.1); border: 1px solid var(--border); width: 420px; text-align: center; }
+
+        /* UI Elements */
+        .btn { padding: 10px 16px; border-radius: 6px; border: 1px solid var(--border); cursor: pointer; font-size: 14px; font-weight: 500; display: inline-flex; align-items: center; justify-content: center; gap: 8px; }
+        .btn-primary { background: var(--accent); color: white; border: none; }
+        .btn-primary:hover { background: #1765cc; }
+        .btn-outline { background: white; color: var(--text-main); }
+        .btn-outline:hover { background: #f1f3f4; }
+        
+        .input-text { width: 100%; padding: 12px; border: 1px solid var(--border); border-radius: 6px; margin-bottom: 16px; font-size: 16px; outline-color: var(--accent); }
+        .hidden { display: none !important; }
+    </style>
+</head>
+<body>
+
+<div id="unlock-overlay" class="overlay">
+    <div class="card">
+        <h2 style="margin-top:0">LocalNote Secure</h2>
+        <p style="color: var(--text-sub); margin-bottom: 24px;">Enter your <strong>Shared Encryption Secret</strong> to unlock student notes for this session.</p>
+        
+        <div style="position: relative;">
+            <input type="password" id="pass-input" class="input-text" placeholder="Secret Key...">
+            <button type="button" onclick="App.togglePass()" style="position: absolute; right: 10px; top: 12px; border:none; background:none; cursor:pointer;">👁️</button>
+        </div>
+        
+        <button class="btn btn-primary" style="width:100%; padding: 14px;" onclick="App.unlock()">Unlock Session</button>
+        
+        <p style="font-size: 12px; color: var(--text-sub); margin-top: 20px; line-height: 1.4;">
+            Data is encrypted locally using AES-GCM 256. <br>
+            Files on Google Drive stay encrypted and private.
+        </p>
+    </div>
+</div>
+
+<div id="app-shell" class="blur">
+    <aside>
+        <button class="btn btn-primary" onclick="App.createNote()">＋ Create New Note</button>
+        <button class="btn btn-outline" onclick="App.importNote()">📂 Open Existing File</button>
+        
+        <div class="sidebar-label">Search Student</div>
+        <input type="text" id="search" class="input-text" style="margin-bottom:4px" placeholder="Type to filter..." oninput="App.renderList()">
+        
+        <div class="sidebar-label">Recently Opened</div>
+        <div id="file-list"></div>
+
+        <button class="btn btn-outline" style="margin-top:auto; border-color: #f5c2c7; color: var(--danger)" onclick="App.lock()">🔒 Lock & Clear Session</button>
+    </aside>
+
+    <main>
+        <div id="conflict-bar">
+            ⚠️ This file was updated on Drive. <button class="btn btn-primary" style="padding: 2px 8px; font-size: 12px;" onclick="App.syncNow()">Load Update</button>
+        </div>
+        <header>
+            <div id="active-filename" style="font-weight: 600; font-size: 16px;">No student selected</div>
+            <div id="save-status" style="font-size: 12px; color: var(--text-sub)">Ready</div>
+        </header>
+        <textarea id="editor" placeholder="Select a note or create one to begin..." disabled></textarea>
+    </main>
+</div>
+
+<script>
+/**
+ * LOCALNOTE - ARCHITECTURE V2026
+ */
+const App = {
+    state: {
+        db: null,
+        key: null,
+        currentHandle: null,
+        lastMTime: 0,
+        isDirty: false,
+        saveTimeout: null
+    },
+
+    async init() {
+        // Init IndexedDB for file handle persistence
+        this.state.db = await new Promise(res => {
+            const req = indexedDB.open('LocalNote_v2026', 1);
+            req.onupgradeneeded = () => req.result.createObjectStore('handles');
+            req.onsuccess = () => res(req.result);
+        });
+        
+        this.renderList();
+        
+        // Background Polling for Cloud Sync Conflicts
+        setInterval(() => this.pollDisk(), 4000);
+
+        // Register Service Worker for PWA
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('./sw.js').catch(()=>{});
+        }
+     head: document.head
+    },
+
+    // --- SESSION CONTROL ---
+    unlock() {
+        const pass = document.getElementById('pass-input').value;
+        if (!pass || pass.length < 3) {
+            alert("Please enter a valid shared secret.");
+            return;
+        }
+        this.state.key = pass;
+        document.getElementById('unlock-overlay').classList.add('hidden');
+        document.getElementById('app-shell').classList.remove('blur');
+        document.getElementById('editor').disabled = false;
+        document.getElementById('save-status').textContent = "Session Active";
+    },
+
+    lock() {
+        if (confirm("Lock session? You will need to re-enter your key to view notes.")) {
+            location.reload(); 
+        }
+    },
+
+    togglePass() {
+        const el = document.getElementById('pass-input');
+        el.type = el.type === 'password' ? 'text' : 'password';
+    },
+
+    // --- CRYPTO ENGINE ---
+    async getCryptoKey() {
+        const enc = new TextEncoder();
+        const baseKey = await crypto.subtle.importKey("raw", enc.encode(this.state.key), "PBKDF2", false, ["deriveKey"]);
+        return crypto.subtle.deriveKey(
+            { name: "PBKDF2", salt: enc.encode("LocalNote-Permanent-Salt-2026"), iterations: 100000, hash: "SHA-256" },
+            baseKey, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]
+        );
+    },
+
+    async encrypt(text) {
+        const key = await this.getCryptoKey();
+        const iv = crypto.getRandomValues(new Uint8Array(12));
+        const cipher = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, new TextEncoder().encode(text));
+        const blob = new Uint8Array(iv.length + cipher.byteLength);
+        blob.set(iv); blob.set(new Uint8Array(cipher), 12);
+        return blob;
+    },
+
+    async decrypt(buffer) {
+        try {
+            const key = await this.getCryptoKey();
+            const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv: buffer.slice(0, 12) }, key, buffer.slice(12));
+            return new TextDecoder().decode(plain);
+        } catch (e) { 
+            return "### DECRYPTION ERROR ###\nYour secret key might be wrong, or the file is corrupted."; 
+        }
+    },
+
+    // --- FILE OPERATIONS ---
+    async createNote() {
+        try {
+            const h = await window.showSaveFilePicker({ types: [{ accept: {'text/plain': ['.txt']} }] });
+            await this.persistHandle(h);
+            this.loadFile(h);
+        } catch (e) {}
+    },
+
+    async importNote() {
+        try {
+            const [h] = await window.showOpenFilePicker();
+            await this.persistHandle(h);
+            this.loadFile(h);
+        } catch (e) {}
+    },
+
+    async persistHandle(h) {
+        const tx = this.state.db.transaction('handles', 'readwrite');
+        await tx.objectStore('handles').put(h, h.name);
+        this.renderList();
+    },
+
+    async loadFile(h) {
+        try {
+            if (await h.queryPermission({mode: 'readwrite'}) !== 'granted') {
+                if (await h.requestPermission({mode: 'readwrite'}) !== 'granted') return;
+            }
+            
+            const file = await h.getFile();
+            const buffer = await file.arrayBuffer();
+            
+            this.state.currentHandle = h;
+            this.state.lastMTime = file.lastModified;
+            this.state.isDirty = false;
+            
+            const decryptedContent = buffer.byteLength > 0 ? await this.decrypt(new Uint8Array(buffer)) : "";
+            
+            document.getElementById('editor').value = decryptedContent;
+            document.getElementById('active-filename').textContent = h.name;
+            document.getElementById('conflict-bar').style.display = 'none';
+            document.getElementById('save-status').textContent = "Loaded from disk";
+            this.renderList();
+        } catch (e) {
+            console.error(e);
+        }
+    },
+
+    async save() {
+        if (!this.state.currentHandle || !this.state.key) return;
+        
+        try {
+            const blob = await this.encrypt(document.getElementById('editor').value);
+            const stream = await this.state.currentHandle.createWritable();
+            await stream.write(blob);
+            await stream.close();
+            
+            const f = await this.state.currentHandle.getFile();
+            this.state.lastMTime = f.lastModified;
+            this.state.isDirty = false;
+            document.getElementById('save-status').textContent = "✓ Encrypted & Saved";
+        } catch (e) {
+            document.getElementById('save-status').textContent = "⚠️ Error Saving";
+        }
+    },
+
+    // --- SYNC & CONFLICTS ---
+    async pollDisk() {
+        if (!this.state.currentHandle || !this.state.key) return;
+        const file = await this.state.currentHandle.getFile();
+        
+        if (file.lastModified > this.state.lastMTime) {
+            if (this.state.isDirty) {
+                document.getElementById('conflict-bar').style.display = 'block';
+            } else {
+                this.loadFile(this.state.currentHandle); // Update silently if user isn't editing
+            }
+        }
+    },
+
+    syncNow() {
+        if (confirm("Load newest version? Unsaved changes will be lost.")) {
+            this.loadFile(this.state.currentHandle);
+        }
+    },
+
+    // --- SIDEBAR UI ---
+    async removeHandle(e, name) {
+        e.stopPropagation();
+        if (confirm(`Remove shortcut for "${name}"? The file remains on your disk.`)) {
+            const tx = this.state.db.transaction('handles', 'readwrite');
+            await tx.objectStore('handles').delete(name);
+            if (this.state.currentHandle?.name === name) {
+                this.state.currentHandle = null;
+                document.getElementById('editor').value = '';
+                document.getElementById('active-filename').textContent = 'No student selected';
+            }
+            this.renderList();
+        }
+    },
+
+    renderList() {
+        const list = document.getElementById('file-list');
+        const filter = document.getElementById('search').value.toLowerCase();
+        list.innerHTML = '';
+        
+        this.state.db.transaction('handles').objectStore('handles').getAll().onsuccess = (e) => {
+            const sorted = e.target.result.sort((a,b) => a.name.localeCompare(b.name));
+            sorted.forEach(h => {
+                if (filter && !h.name.toLowerCase().includes(filter)) return;
+                
+                const item = document.createElement('div');
+                item.className = `file-item ${this.state.currentHandle?.name === h.name ? 'active' : ''}`;
+                item.onclick = () => this.loadFile(h);
+                item.innerHTML = `
+                    <span style="overflow:hidden; text-overflow:ellipsis;">${h.name}</span>
+                    <span class="remove-btn" onclick="App.removeHandle(event, '${h.name}')">✕</span>
+                `;
+                list.appendChild(item);
+            });
+        };
+    }
+};
+
+// Input Listener
+document.getElementById('editor').oninput = () => {
+    App.state.isDirty = true;
+    document.getElementById('save-status').textContent = "● Editing...";
+    clearTimeout(App.state.saveTimeout);
+    App.state.saveTimeout = setTimeout(() => App.save(), 1000);
+};
+
+// Boot
+App.init();
+</script>
+</body>
+</html>
