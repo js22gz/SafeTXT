@@ -57,6 +57,50 @@
         .input-text { width: 100%; padding: 12px; border: 1px solid var(--border); border-radius: 6px; margin-bottom: 16px; font-size: 16px; outline-color: var(--accent); }
         .hidden { display: none !important; }
     </style>
+            <!-- Inactivity Warning Overlay -->
+            <style>
+                #inactivity-warning {
+                    position: fixed;
+                    bottom: 20px;
+                    right: 20px;
+                    background: #fff3cd;
+                    border: 2px solid #ffc107;
+                    border-radius: 8px;
+                    padding: 20px;
+                    z-index: 2000;
+                    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+                    font-family: 'Segoe UI', system-ui, sans-serif;
+                    min-width: 280px;
+                    animation: slideIn 0.3s ease-out;
+                }
+                @keyframes slideIn {
+                    from { transform: translateX(400px); opacity: 0; }
+                    to { transform: translateX(0); opacity: 1; }
+                }
+                #inactivity-warning h3 {
+                    margin: 0 0 12px 0;
+                    color: #856404;
+                    font-size: 16px;
+                }
+                #inactivity-warning p {
+                    margin: 0 0 12px 0;
+                    color: #856404;
+                    font-size: 14px;
+                }
+                #inactivity-timer {
+                    font-size: 32px;
+                    font-weight: bold;
+                    color: #dc3545;
+                    text-align: center;
+                    margin: 12px 0;
+                    font-family: 'Courier New', monospace;
+                }
+                #inactivity-warning .btn {
+                    width: 100%;
+                    padding: 10px;
+                    margin-top: 12px;
+                }
+            </style>
 </head>
 <body>
 
@@ -102,6 +146,13 @@
             <div id="save-status" style="font-size: 12px; color: var(--text-sub)">Ready</div>
         </header>
         <textarea id="editor" placeholder="Select a note or create one to begin..." disabled></textarea>
+    <div id="inactivity-warning" class="hidden">
+        <h3>⚠️ Inactivity Detected</h3>
+        <p>Your session will lock in:</p>
+        <div id="inactivity-timer">0:30</div>
+        <button class="btn btn-primary" onclick="App.inactivityManager.resetTimer()">I'm Still Here</button>
+        <p style="font-size: 12px; margin-top: 12px; color: #856404;">No action in 5 minutes will lock your session for security.</p>
+    </div>
     </main>
 </div>
 
@@ -136,8 +187,84 @@ const App = {
         if ('serviceWorker' in navigator) {
             navigator.serviceWorker.register('./sw.js').catch(()=>{});
         }
-     head: document.head
+                // Removed incomplete line
     },
+
+        // --- INACTIVITY TIMER ---
+        inactivityManager: {
+            INACTIVITY_THRESHOLD: 5 * 60 * 1000, // 5 minutes
+            WARNING_THRESHOLD: 30 * 1000, // Show warning 30 seconds before lock
+            inactivityTimer: null,
+            warningTimer: null,
+            warningCountdown: null,
+            isWarningVisible: false,
+            countdownSeconds: 30,
+
+            init() {
+                // Listen for user activity
+                const activityEvents = ['mousedown', 'mousemove', 'keypress', 'scroll', 'touchstart', 'click'];
+                activityEvents.forEach(event => {
+                    document.addEventListener(event, () => this.resetTimer(), true);
+                });
+            
+                // Start the inactivity timer
+                this.resetTimer();
+            },
+
+            resetTimer() {
+                clearTimeout(this.inactivityTimer);
+                clearTimeout(this.warningTimer);
+                clearInterval(this.warningCountdown);
+            
+                this.hideWarning();
+                this.isWarningVisible = false;
+            
+                // Set timer to show warning before lock
+                const lockTime = this.INACTIVITY_THRESHOLD - this.WARNING_THRESHOLD;
+            
+                this.inactivityTimer = setTimeout(() => {
+                    this.showWarning();
+                }, lockTime);
+            
+                // Set timer to actually lock if no activity during warning
+                this.warningTimer = setTimeout(() => {
+                    this.lockSession();
+                }, this.INACTIVITY_THRESHOLD);
+            },
+
+            showWarning() {
+                const warningEl = document.getElementById('inactivity-warning');
+                warningEl.classList.remove('hidden');
+                this.isWarningVisible = true;
+                this.countdownSeconds = 30;
+            
+                // Update countdown every second
+                this.warningCountdown = setInterval(() => {
+                    this.countdownSeconds--;
+                    const minutes = Math.floor(this.countdownSeconds / 60);
+                    const seconds = this.countdownSeconds % 60;
+                    document.getElementById('inactivity-timer').textContent = 
+                        `${minutes}:${seconds.toString().padStart(2, '0')}`;
+                
+                    if (this.countdownSeconds <= 0) {
+                        clearInterval(this.warningCountdown);
+                    }
+                }, 1000);
+            },
+
+            hideWarning() {
+                const warningEl = document.getElementById('inactivity-warning');
+                warningEl.classList.add('hidden');
+                this.isWarningVisible = false;
+                clearInterval(this.warningCountdown);
+            },
+
+            lockSession() {
+                this.hideWarning();
+                alert("Your session has been locked due to inactivity. Please re-enter your secret to continue.");
+                App.lock();
+            }
+        },
 
     // --- SESSION CONTROL ---
     unlock() {
@@ -151,7 +278,9 @@ const App = {
         document.getElementById('app-shell').classList.remove('blur');
         document.getElementById('editor').disabled = false;
         document.getElementById('save-status').textContent = "Session Active";
-    },
+            // Start inactivity timer for this session
+            this.inactivityManager.init();
+        },
 
     lock() {
         if (confirm("Lock session? You will need to re-enter your key to view notes.")) {
@@ -196,7 +325,23 @@ const App = {
     // --- FILE OPERATIONS ---
     async createNote() {
         try {
-            const h = await window.showSaveFilePicker({ types: [{ accept: {'text/plain': ['.txt']} }] });
+            // Suggest a default filename and pre-populate with an empty encrypted note
+            const h = await window.showSaveFilePicker({
+                suggestedName: 'untitled.txt',
+                types: [{ accept: {'text/plain': ['.txt']} }]
+            });
+            // Write default (empty) encrypted content so loadFile finds a valid file
+            try {
+                if (this.state.key) {
+                    const blob = await this.encrypt('');
+                    const stream = await h.createWritable();
+                    await stream.write(blob);
+                    await stream.close();
+                }
+            } catch (w) {
+                // ignore write errors; file may be empty
+            }
+
             await this.persistHandle(h);
             this.loadFile(h);
         } catch (e) {}
@@ -300,10 +445,13 @@ const App = {
         list.innerHTML = '';
         
         this.state.db.transaction('handles').objectStore('handles').getAll().onsuccess = (e) => {
-            const sorted = e.target.result.sort((a,b) => a.name.localeCompare(b.name));
+            const results = e.target.result || [];
+            if (!results.length) return; // nothing to render
+
+            const sorted = results.sort((a,b) => a.name.localeCompare(b.name));
             sorted.forEach(h => {
                 if (filter && !h.name.toLowerCase().includes(filter)) return;
-                
+
                 const item = document.createElement('div');
                 item.className = `file-item ${this.state.currentHandle?.name === h.name ? 'active' : ''}`;
                 item.onclick = () => this.loadFile(h);
