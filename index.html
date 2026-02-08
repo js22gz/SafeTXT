@@ -216,7 +216,8 @@ const App = {
         currentHandle: null,
         lastMTime: 0,
         isDirty: false,
-        saveTimeout: null
+        saveTimeout: null,
+        searchTimeout: null
     },
 
     async init() {
@@ -298,14 +299,13 @@ const App = {
     // --- SEARCH DEBOUNCING ---
     setupSearchInput() {
         const searchInput = document.getElementById('search');
-        let searchTimeout;
         
         searchInput.addEventListener('input', (e) => {
             // Cancel previous timeout
-            clearTimeout(searchTimeout);
+            clearTimeout(this.state.searchTimeout);
             
             // Wait 300ms after user stops typing
-            searchTimeout = setTimeout(() => {
+            this.state.searchTimeout = setTimeout(() => {
                 this.renderList();
             }, 300);
         });
@@ -412,6 +412,9 @@ const App = {
         if (this.state.saveTimeout) {
             clearTimeout(this.state.saveTimeout);
         }
+        if (this.state.searchTimeout) {
+            clearTimeout(this.state.searchTimeout);
+        }
         
         // Clear inactivity timers
         clearTimeout(this.inactivityManager.inactivityTimer);
@@ -425,10 +428,10 @@ const App = {
         }
     },
 
-    lock() {
+    async lock() {
         if (confirm("Lock session? You will need to re-enter your key to view notes.")) {
             // Cleanup resources
-            this.cleanup();
+            await this.cleanup();
             
             // Note: Setting to null in JavaScript doesn't guarantee immediate memory clearing
             // Browser garbage collection may keep values in memory temporarily
@@ -447,9 +450,11 @@ const App = {
     async getCryptoKey(salt, iterations) {
         const enc = new TextEncoder();
         
-        // Create cache key from salt and iterations
+        // Create cache key from salt and iterations (use base64 for compact representation)
         const saltBytes = salt || enc.encode("LocalNote-Permanent-Salt-2026");
-        const cacheKey = `${new Uint8Array(saltBytes).join(',')}_${iterations || APP_CONFIG.PBKDF2_ITERATIONS}`;
+        const saltArray = new Uint8Array(saltBytes);
+        const saltBase64 = btoa(String.fromCharCode(...saltArray));
+        const cacheKey = `${saltBase64}_${iterations || APP_CONFIG.PBKDF2_ITERATIONS}`;
         
         return await cryptoCache.get(cacheKey, async () => {
             const baseKey = await crypto.subtle.importKey("raw", enc.encode(this.state.key), "PBKDF2", false, ["deriveKey"]);
@@ -656,8 +661,7 @@ const App = {
             }
             
             // Single reflow: replace entire list at once
-            list.innerHTML = '';
-            list.appendChild(fragment);
+            list.replaceChildren(fragment);
             
             PERF.mark('renderList-end');
             PERF.measure('renderList', 'renderList-start', 'renderList-end');
