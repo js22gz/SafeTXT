@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>LocalNote Secure | GDPR-Ready</title>
+    <title>SafeTXT</title>
     <link rel="manifest" href="manifest.json">
     <style>
         :root {
@@ -56,57 +56,30 @@
         
         .input-text { width: 100%; padding: 12px; border: 1px solid var(--border); border-radius: 6px; margin-bottom: 16px; font-size: 16px; outline-color: var(--accent); }
         .hidden { display: none !important; }
+
+        /* Inactivity Warning */
+        #inactivity-warning {
+            position: fixed; bottom: 20px; right: 20px;
+            background: #fff3cd; border: 2px solid #ffc107; border-radius: 8px;
+            padding: 20px; z-index: 2000;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            min-width: 280px; animation: slideIn 0.3s ease-out;
+        }
+        @keyframes slideIn {
+            from { transform: translateX(400px); opacity: 0; }
+            to { transform: translateX(0); opacity: 1; }
+        }
+        #inactivity-warning h3 { margin: 0 0 12px 0; color: #856404; font-size: 16px; }
+        #inactivity-warning p { margin: 0 0 12px 0; color: #856404; font-size: 14px; }
+        #inactivity-timer { font-size: 32px; font-weight: bold; color: #dc3545; text-align: center; margin: 12px 0; font-family: 'Courier New', monospace; }
+        #inactivity-warning .btn { width: 100%; padding: 10px; margin-top: 12px; }
     </style>
-            <!-- Inactivity Warning Overlay -->
-            <style>
-                #inactivity-warning {
-                    position: fixed;
-                    bottom: 20px;
-                    right: 20px;
-                    background: #fff3cd;
-                    border: 2px solid #ffc107;
-                    border-radius: 8px;
-                    padding: 20px;
-                    z-index: 2000;
-                    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
-                    font-family: 'Segoe UI', system-ui, sans-serif;
-                    min-width: 280px;
-                    animation: slideIn 0.3s ease-out;
-                }
-                @keyframes slideIn {
-                    from { transform: translateX(400px); opacity: 0; }
-                    to { transform: translateX(0); opacity: 1; }
-                }
-                #inactivity-warning h3 {
-                    margin: 0 0 12px 0;
-                    color: #856404;
-                    font-size: 16px;
-                }
-                #inactivity-warning p {
-                    margin: 0 0 12px 0;
-                    color: #856404;
-                    font-size: 14px;
-                }
-                #inactivity-timer {
-                    font-size: 32px;
-                    font-weight: bold;
-                    color: #dc3545;
-                    text-align: center;
-                    margin: 12px 0;
-                    font-family: 'Courier New', monospace;
-                }
-                #inactivity-warning .btn {
-                    width: 100%;
-                    padding: 10px;
-                    margin-top: 12px;
-                }
-            </style>
 </head>
 <body>
 
 <div id="unlock-overlay" class="overlay">
     <div class="card">
-        <h2 style="margin-top:0">LocalNote Secure</h2>
+        <h2 style="margin-top:0">SafeTXT 🔐</h2>
         <p style="color: var(--text-sub); margin-bottom: 24px;">Enter your <strong>Shared Encryption Secret</strong> to unlock student notes for this session.</p>
         
         <div style="position: relative;">
@@ -146,94 +119,27 @@
             <div id="save-status" style="font-size: 12px; color: var(--text-sub)">Ready</div>
         </header>
         <textarea id="editor" placeholder="Select a note or create one to begin..." disabled></textarea>
-    <div id="inactivity-warning" class="hidden">
-        <h3>⚠️ Inactivity Detected</h3>
-        <p>Your session will lock in:</p>
-        <div id="inactivity-timer">0:30</div>
-        <button class="btn btn-primary" onclick="App.inactivityManager.resetTimer()">I'm Still Here</button>
-        <p style="font-size: 12px; margin-top: 12px; color: #856404;">No action in 10 minutes will lock your session for security.</p>
-    </div>
+        <div id="inactivity-warning" class="hidden">
+            <h3>⚠️ Inactivity Detected</h3>
+            <p>Your session will lock in:</p>
+            <div id="inactivity-timer">0:30</div>
+            <button class="btn btn-primary" onclick="App.inactivityManager.resetTimer()">I'm Still Here</button>
+            <p style="font-size: 12px; margin-top: 12px; color: #856404;">No action in 10 minutes will lock your session for security.</p>
+        </div>
     </main>
 </div>
 
 <script>
-/**
- * LOCALNOTE - ARCHITECTURE V2026
- */
-
-// Application configuration for encrypted file format
 const APP_CONFIG = {
-    FILE_FORMAT_VERSION: 0x01,  // Current file format version
-    SALT_LENGTH: 16,             // Bytes for per-device salt
-    IV_LENGTH: 12,               // Bytes for AES-GCM IV
-    PBKDF2_ITERATIONS: 600000    // FIPS-140 compliant iteration count
-};
-
-// Performance monitoring utilities
-const PERF = {
-    mark: (label) => performance.mark(label),
-    measure: (label, startMark, endMark) => {
-        try {
-            performance.measure(label, startMark, endMark);
-            const measure = performance.getEntriesByName(label)[0];
-            console.log(`[PERF] ${label}: ${measure.duration.toFixed(2)}ms`);
-        } catch (e) {
-            console.warn('Performance measurement failed:', e);
-        }
-    }
-};
-
-// Crypto key caching to reduce re-derivation overhead
-class CryptoCache {
-    constructor(ttl = 60000) { // 60000ms (60 seconds) TTL
-        this.cache = {};
-        this.ttl = ttl;
-    }
-    
-    async get(key, fn) {
-        const now = Date.now();
-        
-        if (this.cache[key] && now - this.cache[key].time < this.ttl) {
-            return this.cache[key].value;
-        }
-        
-        const value = await fn();
-        this.cache[key] = { value, time: now };
-        return value;
-    }
-    
-    clear() {
-        this.cache = {};
-    }
-}
-
-const cryptoCache = new CryptoCache(60000);
-
-// Configuration constants - eliminates magic numbers throughout codebase
-const CONFIG = {
-    POLL_INTERVAL_MS: 4000,           // Disk poll frequency
-    AUTO_SAVE_DELAY_MS: 1000,         // Delay before auto-saving
-    INACTIVITY_TIMEOUT_MS: 10 * 60 * 1000, // 10 minutes
-    MAX_FILE_SIZE_MB: 100,
-    DB_NAME: 'LocalNote_v2026',
-    DB_VERSION: 1,
-    OPERATION_TIMEOUT_MS: 30000,      // 30 second operation timeout
-};
-
-// Debug logging utility for better debugging
-const DEBUG = {
-    log: (component, message, data = null) => {
-        const timestamp = new Date().toLocaleTimeString();
-        console.log(`[${timestamp}] [${component}] ${message}`, data || '');
-    },
-    error: (component, message, error = null) => {
-        const timestamp = new Date().toLocaleTimeString();
-        console.error(`[${timestamp}] [${component}] ERROR: ${message}`, error || '');
-    },
-    warn: (component, message, data = null) => {
-        const timestamp = new Date().toLocaleTimeString();
-        console.warn(`[${timestamp}] [${component}] WARNING: ${message}`, data || '');
-    }
+    FILE_FORMAT_VERSION: 0x01,
+    SALT_LENGTH: 16,
+    IV_LENGTH: 12,
+    PBKDF2_ITERATIONS: 600000,
+    POLL_INTERVAL_MS: 4000,
+    AUTO_SAVE_DELAY_MS: 1000,
+    INACTIVITY_TIMEOUT_MS: 10 * 60 * 1000,
+    DB_NAME: 'LocalNote_v2026', // preserve original name so existing users keep their file handles
+    DB_VERSION: 1
 };
 
 const App = {
@@ -247,266 +153,140 @@ const App = {
         searchTimeout: null
     },
 
-    // Wrapper for operations with timeout
-    async withTimeout(promise, timeoutMs, operationName) {
-        const timeoutPromise = new Promise((_, reject) =>
-            setTimeout(() => reject(new Error(`${operationName} timed out after ${timeoutMs}ms`)), timeoutMs)
-        );
-        
-        return Promise.race([promise, timeoutPromise]);
-    },
-
     async init() {
-        DEBUG.log('init', 'Initializing application');
-        
         try {
-            // Init IndexedDB for file handle persistence with comprehensive error handling
             this.state.db = await new Promise((resolve, reject) => {
-                const req = indexedDB.open(CONFIG.DB_NAME, CONFIG.DB_VERSION);
-                
+                const req = indexedDB.open(APP_CONFIG.DB_NAME, APP_CONFIG.DB_VERSION);
                 req.onupgradeneeded = (e) => {
-                    try {
-                        const db = e.target.result;
-                        if (!db.objectStoreNames.contains('handles')) {
-                            db.createObjectStore('handles');
-                            DEBUG.log('init', 'Created IndexedDB object store');
-                        }
-                    } catch (err) {
-                        DEBUG.error('init', 'Database upgrade failed', err);
-                        reject(new Error('Database setup failed: ' + err.message));
-                    }
+                    const db = e.target.result;
+                    if (!db.objectStoreNames.contains('handles')) db.createObjectStore('handles');
                 };
-                
-                req.onsuccess = () => {
-                    DEBUG.log('init', 'IndexedDB opened successfully');
-                    resolve(req.result);
-                };
-                
-                req.onerror = () => {
-                    const error = req.error || new Error('Unknown IndexedDB error');
-                    DEBUG.error('init', 'IndexedDB error', error);
-                    reject(error);
-                    document.getElementById('save-status').textContent = 
-                        "⚠️ Local storage unavailable - changes may not persist";
-                };
-                
-                req.onblocked = () => {
-                    DEBUG.warn('init', 'IndexedDB blocked - close other tabs');
-                };
+                req.onsuccess = () => resolve(req.result);
+                req.onerror = () => reject(req.error);
             });
-            
-            // Setup event delegation for file list
+
             this.setupFileListHandlers();
-            
-            // Setup search input with debouncing
             this.setupSearchInput();
-            
             await this.renderList();
             this.setupPolling();
             this.setupServiceWorker();
         } catch (e) {
-            DEBUG.error('init', 'Initialization failed', e);
-            // Fall back to in-memory storage
+            console.error('Init failed:', e);
             this.state.db = null;
         }
     },
 
     setupPolling() {
-        // Background Polling for Cloud Sync Conflicts
-        setInterval(() => this.pollDisk(), CONFIG.POLL_INTERVAL_MS);
-        DEBUG.log('setupPolling', `Started disk polling every ${CONFIG.POLL_INTERVAL_MS}ms`);
+        setInterval(() => this.pollDisk(), APP_CONFIG.POLL_INTERVAL_MS);
     },
 
     setupServiceWorker() {
-        // Register Service Worker for PWA
         if ('serviceWorker' in navigator) {
-            navigator.serviceWorker.register('./sw.js')
-                .then(() => DEBUG.log('setupServiceWorker', 'Service worker registered'))
-                .catch((e) => DEBUG.warn('setupServiceWorker', 'Service worker registration failed', e));
+            navigator.serviceWorker.register('./sw.js').catch(() => {});
         }
     },
 
-    // --- EVENT DELEGATION ---
     setupFileListHandlers() {
         const fileList = document.getElementById('file-list');
-        
-        // Single click listener for entire list using event delegation
+
         fileList.addEventListener('click', (e) => {
             const removeBtn = e.target.closest('.remove-btn');
             if (removeBtn) {
-                const item = removeBtn.closest('.file-item');
-                const fileName = item.getAttribute('data-filename');
-                this.removeHandle(e, fileName);
+                const name = removeBtn.closest('.file-item').getAttribute('data-filename');
+                this.removeHandle(e, name);
                 return;
             }
-            
             const item = e.target.closest('.file-item');
-            if (item) {
-                const fileName = item.getAttribute('data-filename');
-                // Get the handle from IndexedDB and load it
-                if (!this.state.db) {
-                    DEBUG.error('setupFileListHandlers', 'Database not available');
-                    return;
-                }
+            if (item && this.state.db) {
                 const tx = this.state.db.transaction('handles');
-                const req = tx.objectStore('handles').get(fileName);
-                req.onsuccess = () => {
-                    if (req.result) {
-                        this.loadFile(req.result);
-                    }
-                };
+                const req = tx.objectStore('handles').get(item.getAttribute('data-filename'));
+                req.onsuccess = () => { if (req.result) this.loadFile(req.result); };
             }
         });
-        
-        // Keyboard navigation support
+
         fileList.addEventListener('keydown', (e) => {
             const item = e.target.closest('.file-item');
-            if (!item) return;
-            
+            if (!item || !this.state.db) return;
+
             if (e.key === 'Enter' || e.key === ' ') {
                 e.preventDefault();
-                const fileName = item.getAttribute('data-filename');
-                if (!this.state.db) {
-                    DEBUG.error('setupFileListHandlers', 'Database not available');
-                    return;
-                }
                 const tx = this.state.db.transaction('handles');
-                const req = tx.objectStore('handles').get(fileName);
-                req.onsuccess = () => {
-                    if (req.result) {
-                        this.loadFile(req.result);
-                    }
-                };
+                const req = tx.objectStore('handles').get(item.getAttribute('data-filename'));
+                req.onsuccess = () => { if (req.result) this.loadFile(req.result); };
             } else if (e.key === 'Delete' || e.key === 'Backspace') {
                 e.preventDefault();
-                const fileName = item.getAttribute('data-filename');
-                this.removeHandle(e, fileName);
+                this.removeHandle(e, item.getAttribute('data-filename'));
             }
         });
     },
 
-    // --- SEARCH DEBOUNCING ---
     setupSearchInput() {
-        const searchInput = document.getElementById('search');
-        
-        searchInput.addEventListener('input', (e) => {
-            // Cancel previous timeout
+        document.getElementById('search').addEventListener('input', () => {
             clearTimeout(this.state.searchTimeout);
-            
-            // Wait 300ms after user stops typing
-            this.state.searchTimeout = setTimeout(() => {
-                this.renderList();
-            }, 300);
+            this.state.searchTimeout = setTimeout(() => this.renderList(), 300);
         });
     },
 
-        // --- INACTIVITY TIMER ---
-        inactivityManager: {
-            INACTIVITY_THRESHOLD: CONFIG.INACTIVITY_TIMEOUT_MS, // 10 minutes (GDPR best practice)
-            WARNING_THRESHOLD: 30 * 1000, // Show warning 30 seconds before lock
-            inactivityTimer: null,
-            warningTimer: null,
-            warningCountdown: null,
-            isWarningVisible: false,
-            countdownSeconds: 30,
+    // --- INACTIVITY TIMER ---
+    inactivityManager: {
+        INACTIVITY_THRESHOLD: APP_CONFIG.INACTIVITY_TIMEOUT_MS,
+        WARNING_SECONDS: 30,
+        inactivityTimer: null,
+        warningTimer: null,
+        warningCountdown: null,
 
-            init() {
-                // Listen for user activity
-                const activityEvents = ['mousedown', 'mousemove', 'keypress', 'scroll', 'touchstart', 'click'];
-                activityEvents.forEach(event => {
-                    document.addEventListener(event, () => this.resetTimer(), true);
-                });
-            
-                // Start the inactivity timer
-                this.resetTimer();
-            },
-
-            resetTimer() {
-                clearTimeout(this.inactivityTimer);
-                clearTimeout(this.warningTimer);
-                clearInterval(this.warningCountdown);
-            
-                this.hideWarning();
-                this.isWarningVisible = false;
-            
-                // Set timer to show warning before lock
-                const lockTime = this.INACTIVITY_THRESHOLD - this.WARNING_THRESHOLD;
-            
-                this.inactivityTimer = setTimeout(() => {
-                    this.showWarning();
-                }, lockTime);
-            
-                // Set timer to actually lock if no activity during warning
-                this.warningTimer = setTimeout(() => {
-                    this.lockSession();
-                }, this.INACTIVITY_THRESHOLD);
-            },
-
-            showWarning() {
-                const warningEl = document.getElementById('inactivity-warning');
-                warningEl.classList.remove('hidden');
-                this.isWarningVisible = true;
-                this.countdownSeconds = 30;
-            
-                // Update countdown every second
-                this.warningCountdown = setInterval(() => {
-                    this.countdownSeconds--;
-                    const minutes = Math.floor(this.countdownSeconds / 60);
-                    const seconds = this.countdownSeconds % 60;
-                    document.getElementById('inactivity-timer').textContent = 
-                        `${minutes}:${seconds.toString().padStart(2, '0')}`;
-                
-                    if (this.countdownSeconds <= 0) {
-                        clearInterval(this.warningCountdown);
-                    }
-                }, 1000);
-            },
-
-            hideWarning() {
-                const warningEl = document.getElementById('inactivity-warning');
-                warningEl.classList.add('hidden');
-                this.isWarningVisible = false;
-                clearInterval(this.warningCountdown);
-            },
-
-            lockSession() {
-                this.hideWarning();
-                alert("Your session has been locked due to inactivity. Please re-enter your secret to continue.");
-                App.lock();
-            },
-            
-            cleanup() {
-                clearTimeout(this.inactivityTimer);
-                clearTimeout(this.warningTimer);
-                clearInterval(this.warningCountdown);
-                this.hideWarning();
-            }
+        init() {
+            ['mousedown', 'mousemove', 'keypress', 'scroll', 'touchstart', 'click'].forEach(evt => {
+                document.addEventListener(evt, () => this.resetTimer(), true);
+            });
+            this.resetTimer();
         },
 
-    // --- SESSION CONTROL ---
-    // --- MEMORY CLEANUP ---
-    async cleanup() {
-        // Clear crypto cache
-        cryptoCache.clear();
-        
-        // Clear timeouts
-        if (this.state.saveTimeout) {
-            clearTimeout(this.state.saveTimeout);
-        }
-        if (this.state.searchTimeout) {
-            clearTimeout(this.state.searchTimeout);
-        }
-        
-        // Clear inactivity timers
-        this.inactivityManager.cleanup();
-        
-        // Clear database reference
-        if (this.state.db) {
-            this.state.db.close();
-            this.state.db = null;
+        resetTimer() {
+            clearTimeout(this.inactivityTimer);
+            clearTimeout(this.warningTimer);
+            clearInterval(this.warningCountdown);
+            this.hideWarning();
+
+            this.inactivityTimer = setTimeout(() => this.showWarning(),
+                this.INACTIVITY_THRESHOLD - this.WARNING_SECONDS * 1000);
+            this.warningTimer = setTimeout(() => this.lockSession(),
+                this.INACTIVITY_THRESHOLD);
+        },
+
+        showWarning() {
+            const el = document.getElementById('inactivity-warning');
+            el.classList.remove('hidden');
+            let seconds = this.WARNING_SECONDS;
+            this.warningCountdown = setInterval(() => {
+                seconds--;
+                const m = Math.floor(seconds / 60);
+                const s = seconds % 60;
+                document.getElementById('inactivity-timer').textContent = `${m}:${s.toString().padStart(2, '0')}`;
+                if (seconds <= 0) clearInterval(this.warningCountdown);
+            }, 1000);
+        },
+
+        hideWarning() {
+            document.getElementById('inactivity-warning').classList.add('hidden');
+            clearInterval(this.warningCountdown);
+        },
+
+        lockSession() {
+            this.hideWarning();
+            alert("Session locked due to inactivity. Re-enter your secret to continue.");
+            App.lock();
+        },
+
+        cleanup() {
+            clearTimeout(this.inactivityTimer);
+            clearTimeout(this.warningTimer);
+            clearInterval(this.warningCountdown);
+            this.hideWarning();
         }
     },
 
+    // --- SESSION CONTROL ---
     unlock() {
         const pass = document.getElementById('pass-input').value;
         if (!pass || pass.length < 10) {
@@ -518,20 +298,18 @@ const App = {
         document.getElementById('app-shell').classList.remove('blur');
         document.getElementById('editor').disabled = false;
         document.getElementById('save-status').textContent = "Session Active";
-            // Start inactivity timer for this session
-            this.inactivityManager.init();
-        },
+        this.inactivityManager.init();
+    },
 
     async lock() {
         if (confirm("Lock session? You will need to re-enter your key to view notes.")) {
-            // Clean up resources before locking
-            await this.cleanup();
-            
-            // Note: Setting to null in JavaScript doesn't guarantee immediate memory clearing
-            // Browser garbage collection may keep values in memory temporarily
+            clearTimeout(this.state.saveTimeout);
+            clearTimeout(this.state.searchTimeout);
+            this.inactivityManager.cleanup();
+            if (this.state.db) { this.state.db.close(); this.state.db = null; }
             this.state.key = null;
             this.state.currentHandle = null;
-            location.reload(); 
+            location.reload();
         }
     },
 
@@ -542,30 +320,21 @@ const App = {
 
     // --- CRYPTO ENGINE ---
     async getCryptoKey(salt, iterations) {
-        // Create efficient cache key using base64 encoding
-        // Using Array.from to avoid stack overflow with large arrays
-        const saltKey = salt ? btoa(Array.from(salt, byte => String.fromCharCode(byte)).join('')) : 'default';
-        const cacheKey = `${saltKey}_${iterations}`;
-        
-        return cryptoCache.get(cacheKey, async () => {
-            const enc = new TextEncoder();
-            const baseKey = await crypto.subtle.importKey("raw", enc.encode(this.state.key), "PBKDF2", false, ["deriveKey"]);
-            // Note: Fallback to hardcoded salt is intentional for backwards compatibility with existing files
-            // New files use random per-device salts for enhanced security
-            return crypto.subtle.deriveKey(
-                { name: "PBKDF2", salt: salt || enc.encode("LocalNote-Permanent-Salt-2026"), iterations: iterations || APP_CONFIG.PBKDF2_ITERATIONS, hash: "SHA-256" },
-                baseKey, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]
-            );
-        });
+        const enc = new TextEncoder();
+        const baseKey = await crypto.subtle.importKey("raw", enc.encode(this.state.key), "PBKDF2", false, ["deriveKey"]);
+        // Legacy salt value must be preserved for backwards compatibility with existing encrypted files
+        return crypto.subtle.deriveKey(
+            { name: "PBKDF2", salt: salt || enc.encode("LocalNote-Permanent-Salt-2026"), iterations: iterations || APP_CONFIG.PBKDF2_ITERATIONS, hash: "SHA-256" },
+            baseKey, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]
+        );
     },
 
     async encrypt(text) {
         const iv = crypto.getRandomValues(new Uint8Array(APP_CONFIG.IV_LENGTH));
         const salt = crypto.getRandomValues(new Uint8Array(APP_CONFIG.SALT_LENGTH));
-        const derivedKey = await this.getCryptoKey(salt, APP_CONFIG.PBKDF2_ITERATIONS);
-        const cipher = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, derivedKey, new TextEncoder().encode(text));
-        
-        // New format: [VERSION (1 byte)][SALT (16 bytes)][IV (12 bytes)][CIPHERTEXT + TAG]
+        const key = await this.getCryptoKey(salt, APP_CONFIG.PBKDF2_ITERATIONS);
+        const cipher = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, new TextEncoder().encode(text));
+
         const blob = new Uint8Array(1 + APP_CONFIG.SALT_LENGTH + APP_CONFIG.IV_LENGTH + cipher.byteLength);
         blob[0] = APP_CONFIG.FILE_FORMAT_VERSION;
         blob.set(salt, 1);
@@ -576,39 +345,27 @@ const App = {
 
     async decrypt(buffer) {
         try {
-            if (!buffer || buffer.length < 29) {
-                throw new Error('File too small or corrupted');
-            }
-            
+            if (!buffer || buffer.length < 29) throw new Error('File too small or corrupted');
+
             let salt, iv, ciphertext, iterations;
-            
-            // Check if file has version byte (new format)
+
             if (buffer[0] === APP_CONFIG.FILE_FORMAT_VERSION) {
-                // New format: [VERSION][SALT][IV][CIPHERTEXT]
                 salt = buffer.slice(1, 1 + APP_CONFIG.SALT_LENGTH);
                 iv = buffer.slice(1 + APP_CONFIG.SALT_LENGTH, 1 + APP_CONFIG.SALT_LENGTH + APP_CONFIG.IV_LENGTH);
                 ciphertext = buffer.slice(1 + APP_CONFIG.SALT_LENGTH + APP_CONFIG.IV_LENGTH);
-                iterations = APP_CONFIG.PBKDF2_ITERATIONS; // Use new iteration count
+                iterations = APP_CONFIG.PBKDF2_ITERATIONS;
             } else {
-                // Old format (backwards compatibility): [IV][CIPHERTEXT]
-                salt = null; // Use default salt
+                salt = null;
                 iv = buffer.slice(0, 12);
                 ciphertext = buffer.slice(12);
-                iterations = 100000; // Use old iteration count for backwards compatibility
+                iterations = 100000;
             }
-            
+
             const key = await this.getCryptoKey(salt, iterations);
             const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, ciphertext);
-            
-            DEBUG.log('decrypt', 'Decryption successful');
             return new TextDecoder().decode(plain);
         } catch (e) {
-            DEBUG.error('decrypt', 'Decryption failed', e);
-            
-            if (e.name === 'OperationError') {
-                return "### DECRYPTION ERROR ###\nIncorrect password or corrupted file.";
-            }
-            
+            if (e.name === 'OperationError') return "### DECRYPTION ERROR ###\nIncorrect password or corrupted file.";
             return `### DECRYPTION ERROR ###\n${e.message}`;
         }
     },
@@ -616,184 +373,96 @@ const App = {
     // --- FILE OPERATIONS ---
     async createNote() {
         try {
-            DEBUG.log('createNote', 'Opening save file picker');
-            
-            // Suggest a default filename and pre-populate with an empty encrypted note
             const h = await window.showSaveFilePicker({
                 suggestedName: 'untitled.txt',
                 types: [{ accept: {'text/plain': ['.txt']} }]
             });
-            
-            DEBUG.log('createNote', `Creating new note: ${h.name}`);
-            
-            // Write default (empty) encrypted content so loadFile finds a valid file
+
             if (this.state.key) {
                 const blob = await this.encrypt('');
                 const stream = await h.createWritable();
                 await stream.write(blob);
                 await stream.close();
-                DEBUG.log('createNote', 'Encrypted blank content written');
             }
 
             await this.persistHandle(h);
             await this.loadFile(h);
-            
             document.getElementById('save-status').textContent = "✓ New note created";
-            DEBUG.log('createNote', 'Note created successfully');
         } catch (e) {
-            // Only log if not user cancellation
             if (e.name !== 'AbortError') {
-                DEBUG.error('createNote', 'Error creating note', e);
-                document.getElementById('save-status').textContent = 
-                    `⚠️ Failed to create note: ${e.message}`;
-            } else {
-                DEBUG.log('createNote', 'User cancelled note creation');
+                document.getElementById('save-status').textContent = "⚠️ Failed to create note";
             }
         }
     },
 
     async importNote() {
         try {
-            DEBUG.log('importNote', 'Opening file picker');
-            
             const [h] = await window.showOpenFilePicker();
-            DEBUG.log('importNote', `Importing file: ${h.name}`);
-            
             await this.persistHandle(h);
             await this.loadFile(h);
-            
             document.getElementById('save-status').textContent = "✓ File imported";
-            DEBUG.log('importNote', 'File imported successfully');
         } catch (e) {
-            // Only log if not user cancellation
             if (e.name !== 'AbortError') {
-                DEBUG.error('importNote', 'Error importing file', e);
-                document.getElementById('save-status').textContent = 
-                    `⚠️ Failed to import file: ${e.message}`;
-            } else {
-                DEBUG.log('importNote', 'User cancelled file import');
+                document.getElementById('save-status').textContent = "⚠️ Failed to import file";
             }
         }
     },
 
     async persistHandle(h) {
-        try {
-            DEBUG.log('persistHandle', `Persisting handle: ${h.name}`);
-            const tx = this.state.db.transaction('handles', 'readwrite');
-            await tx.objectStore('handles').put(h, h.name);
-            await this.renderList();
-        } catch (e) {
-            DEBUG.error('persistHandle', 'Failed to persist handle', e);
-            throw new Error('Failed to save file reference: ' + e.message);
-        }
+        const tx = this.state.db.transaction('handles', 'readwrite');
+        await tx.objectStore('handles').put(h, h.name);
+        await this.renderList();
     },
 
-    // Helper method to get handles from IndexedDB
     async getHandlesFromDB() {
-        if (!this.state.db) {
-            DEBUG.warn('getHandlesFromDB', 'No database available');
-            return [];
-        }
-        
+        if (!this.state.db) return [];
         return new Promise((resolve, reject) => {
-            try {
-                const tx = this.state.db.transaction('handles', 'readonly');
-                const store = tx.objectStore('handles');
-                const req = store.getAll();
-                
-                req.onsuccess = () => {
-                    DEBUG.log('getHandlesFromDB', `Retrieved ${req.result?.length || 0} handles`);
-                    resolve(req.result || []);
-                };
-                
-                req.onerror = () => {
-                    DEBUG.error('getHandlesFromDB', 'Database read error', req.error);
-                    reject(new Error('Failed to read from database'));
-                };
-                
-                tx.onerror = () => {
-                    DEBUG.error('getHandlesFromDB', 'Transaction error', tx.error);
-                    reject(new Error('Database transaction failed'));
-                };
-            } catch (e) {
-                DEBUG.error('getHandlesFromDB', 'Error setting up request', e);
-                reject(e);
-            }
+            const req = this.state.db.transaction('handles', 'readonly').objectStore('handles').getAll();
+            req.onsuccess = () => resolve(req.result || []);
+            req.onerror = () => reject(req.error);
         });
     },
 
     async loadFile(h) {
         try {
-            await this.withTimeout(
-                this.loadFileWithPermissions(h),
-                CONFIG.OPERATION_TIMEOUT_MS,
-                'File loading'
-            );
-        } catch (e) {
-            DEBUG.error('loadFile', `Load operation failed`, e);
-            if (e.message.includes('timed out')) {
-                document.getElementById('save-status').textContent = 
-                    "⚠️ File loading took too long. Try again.";
-            } else {
-                document.getElementById('save-status').textContent = 
-                    "⚠️ Error loading file. Please try again.";
+            if (await h.queryPermission({mode: 'readwrite'}) !== 'granted') {
+                if (await h.requestPermission({mode: 'readwrite'}) !== 'granted') {
+                    document.getElementById('save-status').textContent = "⚠️ Permission denied";
+                    return;
+                }
             }
-        }
-    },
 
-    async loadFileWithPermissions(h) {
-        DEBUG.log('loadFile', `Loading file: ${h.name}`);
-        
-        if (await h.queryPermission({mode: 'readwrite'}) !== 'granted') {
-            DEBUG.log('loadFile', 'Requesting permission for file');
-            if (await h.requestPermission({mode: 'readwrite'}) !== 'granted') {
-                DEBUG.warn('loadFile', 'Permission denied for file');
-                document.getElementById('save-status').textContent = 
-                    "⚠️ Permission denied. Cannot access this file.";
-                return;
-            }
+            const file = await h.getFile();
+            const buffer = await file.arrayBuffer();
+
+            this.state.currentHandle = h;
+            this.state.lastMTime = file.lastModified;
+            this.state.isDirty = false;
+
+            document.getElementById('editor').value = buffer.byteLength > 0 ? await this.decrypt(new Uint8Array(buffer)) : "";
+            document.getElementById('active-filename').textContent = h.name;
+            document.getElementById('conflict-bar').style.display = 'none';
+            document.getElementById('save-status').textContent = "Loaded from disk";
+            await this.renderList();
+        } catch (e) {
+            document.getElementById('save-status').textContent = "⚠️ Error loading file";
         }
-        
-        const file = await h.getFile();
-        const buffer = await file.arrayBuffer();
-        DEBUG.log('loadFile', `File loaded: ${file.size} bytes`);
-        
-        this.state.currentHandle = h;
-        this.state.lastMTime = file.lastModified;
-        this.state.isDirty = false;
-        
-        const decryptedContent = buffer.byteLength > 0 ? await this.decrypt(new Uint8Array(buffer)) : "";
-        
-        document.getElementById('editor').value = decryptedContent;
-        document.getElementById('active-filename').textContent = h.name;
-        document.getElementById('conflict-bar').style.display = 'none';
-        document.getElementById('save-status').textContent = "Loaded from disk";
-        await this.renderList();
-        DEBUG.log('loadFile', 'File loaded and decrypted successfully');
     },
 
     async save() {
-        if (!this.state.currentHandle || !this.state.key) {
-            DEBUG.warn('save', 'Cannot save: no current handle or key');
-            return;
-        }
-        
+        if (!this.state.currentHandle || !this.state.key) return;
+
         try {
-            DEBUG.log('save', `Saving file: ${this.state.currentHandle.name}`);
-            
             const blob = await this.encrypt(document.getElementById('editor').value);
             const stream = await this.state.currentHandle.createWritable();
             await stream.write(blob);
             await stream.close();
-            
+
             const f = await this.state.currentHandle.getFile();
             this.state.lastMTime = f.lastModified;
             this.state.isDirty = false;
             document.getElementById('save-status').textContent = "✓ Encrypted & Saved";
-            
-            DEBUG.log('save', 'File saved successfully');
         } catch (e) {
-            DEBUG.error('save', 'Error saving file', e);
             document.getElementById('save-status').textContent = "⚠️ Error Saving";
         }
     },
@@ -801,23 +470,16 @@ const App = {
     // --- SYNC & CONFLICTS ---
     async pollDisk() {
         if (!this.state.currentHandle || !this.state.key) return;
-        
         try {
             const file = await this.state.currentHandle.getFile();
-            
             if (file.lastModified > this.state.lastMTime) {
-                DEBUG.log('pollDisk', 'File has been modified externally');
-                
                 if (this.state.isDirty) {
                     document.getElementById('conflict-bar').style.display = 'block';
                 } else {
-                    await this.loadFile(this.state.currentHandle); // Update silently if user isn't editing
+                    await this.loadFile(this.state.currentHandle);
                 }
             }
-        } catch (e) {
-            DEBUG.error('pollDisk', 'Error checking file status', e);
-            // Don't show error to user for polling failures - they're background checks
-        }
+        } catch (e) { /* polling failure — silent */ }
     },
 
     syncNow() {
@@ -830,104 +492,82 @@ const App = {
     async removeHandle(e, name) {
         e.stopPropagation();
         if (confirm(`Remove shortcut for "${name}"? The file remains on your disk.`)) {
-            try {
-                DEBUG.log('removeHandle', `Removing handle: ${name}`);
-                
-                const tx = this.state.db.transaction('handles', 'readwrite');
-                await tx.objectStore('handles').delete(name);
-                
-                if (this.state.currentHandle?.name === name) {
-                    this.state.currentHandle = null;
-                    document.getElementById('editor').value = '';
-                    document.getElementById('active-filename').textContent = 'No student selected';
-                }
-                
-                await this.renderList();
-                DEBUG.log('removeHandle', 'Handle removed successfully');
-            } catch (e) {
-                DEBUG.error('removeHandle', 'Failed to remove handle', e);
-                document.getElementById('save-status').textContent = "⚠️ Error removing file";
+            const tx = this.state.db.transaction('handles', 'readwrite');
+            await tx.objectStore('handles').delete(name);
+
+            if (this.state.currentHandle?.name === name) {
+                this.state.currentHandle = null;
+                document.getElementById('editor').value = '';
+                document.getElementById('active-filename').textContent = 'No student selected';
             }
+            await this.renderList();
         }
     },
 
     async renderList() {
-        PERF.mark('renderList-start');
         const list = document.getElementById('file-list');
         const filter = document.getElementById('search').value.toLowerCase();
-        
+
+        if (!this.state.db) {
+            list.innerHTML = '<p style="color: var(--text-sub);">Local storage unavailable</p>';
+            return;
+        }
+
+        list.innerHTML = '';
+
         try {
-            if (!this.state.db) {
-                list.innerHTML = '<p style="color: var(--text-sub);">Local storage unavailable</p>';
-                DEBUG.warn('renderList', 'Cannot render list - no database');
-                return;
-            }
-            
-            list.innerHTML = ''; // Clear list
-            
             const results = await this.getHandlesFromDB();
             const sorted = results.sort((a, b) => a.name.localeCompare(b.name));
-            
-            // Use DocumentFragment to avoid multiple reflows
             const fragment = document.createDocumentFragment();
-            
+
             sorted.forEach(h => {
                 if (filter && !h.name.toLowerCase().includes(filter)) return;
-                
+
                 const item = document.createElement('div');
                 item.className = `file-item ${this.state.currentHandle?.name === h.name ? 'active' : ''}`;
                 item.setAttribute('data-filename', h.name);
                 item.setAttribute('tabindex', '0');
                 item.setAttribute('role', 'button');
                 item.setAttribute('aria-label', `Open file ${h.name}`);
-                
-                // Create filename span safely to prevent XSS
+
                 const nameSpan = document.createElement('span');
                 nameSpan.style.overflow = 'hidden';
                 nameSpan.style.textOverflow = 'ellipsis';
                 nameSpan.textContent = h.name;
-                
-                // Create remove button
+
                 const removeBtn = document.createElement('span');
                 removeBtn.className = 'remove-btn';
                 removeBtn.textContent = '✕';
                 removeBtn.setAttribute('aria-label', `Remove file ${h.name}`);
                 removeBtn.setAttribute('role', 'button');
-                
+
                 item.appendChild(nameSpan);
                 item.appendChild(removeBtn);
                 fragment.appendChild(item);
             });
-            
+
             list.appendChild(fragment);
-            
+
             if (sorted.length === 0) {
                 list.innerHTML = '<p style="color: var(--text-sub);">No files yet. Create one to start.</p>';
             }
-            
-            DEBUG.log('renderList', `Rendered ${sorted.length} files`);
-            PERF.mark('renderList-end');
-            PERF.measure('renderList', 'renderList-start', 'renderList-end');
         } catch (e) {
-            DEBUG.error('renderList', 'Error rendering file list', e);
             list.innerHTML = '<p style="color: var(--danger);">Error loading file list</p>';
         }
     }
 };
 
-// Input Listener
+// Auto-save on edit
 document.getElementById('editor').oninput = () => {
     App.state.isDirty = true;
     document.getElementById('save-status').textContent = "● Editing...";
     clearTimeout(App.state.saveTimeout);
-    App.state.saveTimeout = setTimeout(() => App.save(), CONFIG.AUTO_SAVE_DELAY_MS);
+    App.state.saveTimeout = setTimeout(() => App.save(), APP_CONFIG.AUTO_SAVE_DELAY_MS);
 };
 
-// Enter key support for password input
+// Enter key on password input
 document.getElementById('pass-input').addEventListener('keypress', (e) => {
-    if (e.key === 'Enter') {
-        App.unlock();
-    }
+    if (e.key === 'Enter') App.unlock();
 });
 
 // Boot

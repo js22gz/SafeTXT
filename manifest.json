@@ -1,7 +1,7 @@
 {
-  "name": "LocalNote Secure",
-  "short_name": "LocalNote",
-  "description": "GDPR-compliant encrypted note-taking for schools.",
+  "name": "SafeTXT",
+  "short_name": "SafeTXT",
+  "description": "Zero-knowledge encrypted note-taking for schools.",
   "start_url": "./index.html",
   "display": "standalone",
   "background_color": "#ffffff",
