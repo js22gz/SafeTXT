@@ -522,16 +522,15 @@ const App = {
             this.inactivityManager.init();
         },
 
-    lock() {
+    async lock() {
         if (confirm("Lock session? You will need to re-enter your key to view notes.")) {
             // Clean up resources before locking
-            this.cleanup();
+            await this.cleanup();
             
             // Note: Setting to null in JavaScript doesn't guarantee immediate memory clearing
             // Browser garbage collection may keep values in memory temporarily
             this.state.key = null;
             this.state.currentHandle = null;
-            this.state.db = null;
             location.reload(); 
         }
     },
@@ -544,7 +543,7 @@ const App = {
     // --- CRYPTO ENGINE ---
     async getCryptoKey(salt, iterations) {
         // Create efficient cache key using base64 encoding
-        const saltKey = salt ? btoa(String.fromCharCode(...salt)) : 'default';
+        const saltKey = salt ? btoa(String.fromCharCode.apply(null, salt)) : 'default';
         const cacheKey = `${saltKey}_${iterations}`;
         
         return cryptoCache.get(cacheKey, async () => {
@@ -878,6 +877,8 @@ const App = {
                 item.className = `file-item ${this.state.currentHandle?.name === h.name ? 'active' : ''}`;
                 item.setAttribute('data-filename', h.name);
                 item.setAttribute('tabindex', '0');
+                item.setAttribute('role', 'button');
+                item.setAttribute('aria-label', `Open file ${h.name}`);
                 
                 // Create filename span safely to prevent XSS
                 const nameSpan = document.createElement('span');
@@ -889,6 +890,8 @@ const App = {
                 const removeBtn = document.createElement('span');
                 removeBtn.className = 'remove-btn';
                 removeBtn.textContent = '✕';
+                removeBtn.setAttribute('aria-label', `Remove ${h.name}`);
+                removeBtn.setAttribute('role', 'button');
                 
                 item.appendChild(nameSpan);
                 item.appendChild(removeBtn);
