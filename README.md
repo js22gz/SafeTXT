@@ -1,7 +1,7 @@
 SAFE.TXT
 
 A secure, sovereign and simple HTML-based .txt-editor with encryption on all files. Everything happens locally in the browser - no server, no uncrypted data in the cloud.  
-Encryption happens in the memory via Web Crypto API and files are autosaved on disk (local or cloud).
+Encryption happens in the memory via Web Crypto API and files are autosaved on disk (local or cloud). Plain text never leaves the device. 
 
 
 Functionality and Key Features:
