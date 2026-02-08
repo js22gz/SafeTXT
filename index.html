@@ -209,6 +209,33 @@ class CryptoCache {
 
 const cryptoCache = new CryptoCache(60000);
 
+// Configuration constants - eliminates magic numbers throughout codebase
+const CONFIG = {
+    POLL_INTERVAL_MS: 4000,           // Disk poll frequency
+    AUTO_SAVE_DELAY_MS: 1000,         // Delay before auto-saving
+    INACTIVITY_TIMEOUT_MS: 10 * 60 * 1000, // 10 minutes
+    MAX_FILE_SIZE_MB: 100,
+    DB_NAME: 'LocalNote_v2026',
+    DB_VERSION: 1,
+    OPERATION_TIMEOUT_MS: 30000,      // 30 second operation timeout
+};
+
+// Debug logging utility for better debugging
+const DEBUG = {
+    log: (component, message, data = null) => {
+        const timestamp = new Date().toLocaleTimeString();
+        console.log(`[${timestamp}] [${component}] ${message}`, data || '');
+    },
+    error: (component, message, error = null) => {
+        const timestamp = new Date().toLocaleTimeString();
+        console.error(`[${timestamp}] [${component}] ERROR: ${message}`, error || '');
+    },
+    warn: (component, message, data = null) => {
+        const timestamp = new Date().toLocaleTimeString();
+        console.warn(`[${timestamp}] [${component}] WARNING: ${message}`, data || '');
+    }
+};
+
 const App = {
     state: {
         db: null,
@@ -220,28 +247,82 @@ const App = {
         searchTimeout: null
     },
 
-    async init() {
-        // Init IndexedDB for file handle persistence
-        this.state.db = await new Promise(res => {
-            const req = indexedDB.open('LocalNote_v2026', 1);
-            req.onupgradeneeded = () => req.result.createObjectStore('handles');
-            req.onsuccess = () => res(req.result);
-        });
+    // Wrapper for operations with timeout
+    async withTimeout(promise, timeoutMs, operationName) {
+        const timeoutPromise = new Promise((_, reject) =>
+            setTimeout(() => reject(new Error(`${operationName} timed out after ${timeoutMs}ms`)), timeoutMs)
+        );
         
-        // Setup event delegation for file list
-        this.setupFileListHandlers();
-        
-        // Setup search input with debouncing
-        this.setupSearchInput();
-        
-        this.renderList();
-        
-        // Background Polling for Cloud Sync Conflicts
-        setInterval(() => this.pollDisk(), 4000);
+        return Promise.race([promise, timeoutPromise]);
+    },
 
+    async init() {
+        DEBUG.log('init', 'Initializing application');
+        
+        try {
+            // Init IndexedDB for file handle persistence with comprehensive error handling
+            this.state.db = await new Promise((resolve, reject) => {
+                const req = indexedDB.open(CONFIG.DB_NAME, CONFIG.DB_VERSION);
+                
+                req.onupgradeneeded = (e) => {
+                    try {
+                        const db = e.target.result;
+                        if (!db.objectStoreNames.contains('handles')) {
+                            db.createObjectStore('handles');
+                            DEBUG.log('init', 'Created IndexedDB object store');
+                        }
+                    } catch (err) {
+                        DEBUG.error('init', 'Database upgrade failed', err);
+                        reject(new Error('Database setup failed: ' + err.message));
+                    }
+                };
+                
+                req.onsuccess = () => {
+                    DEBUG.log('init', 'IndexedDB opened successfully');
+                    resolve(req.result);
+                };
+                
+                req.onerror = () => {
+                    const error = req.error || new Error('Unknown IndexedDB error');
+                    DEBUG.error('init', 'IndexedDB error', error);
+                    reject(error);
+                    document.getElementById('save-status').textContent = 
+                        "⚠️ Local storage unavailable - changes may not persist";
+                };
+                
+                req.onblocked = () => {
+                    DEBUG.warn('init', 'IndexedDB blocked - close other tabs');
+                };
+            });
+            
+            // Setup event delegation for file list
+            this.setupFileListHandlers();
+            
+            // Setup search input with debouncing
+            this.setupSearchInput();
+            
+            await this.renderList();
+            this.setupPolling();
+            this.setupServiceWorker();
+        } catch (e) {
+            DEBUG.error('init', 'Initialization failed', e);
+            // Fall back to in-memory storage
+            this.state.db = null;
+        }
+    },
+
+    setupPolling() {
+        // Background Polling for Cloud Sync Conflicts
+        setInterval(() => this.pollDisk(), CONFIG.POLL_INTERVAL_MS);
+        DEBUG.log('setupPolling', `Started disk polling every ${CONFIG.POLL_INTERVAL_MS}ms`);
+    },
+
+    setupServiceWorker() {
         // Register Service Worker for PWA
         if ('serviceWorker' in navigator) {
-            navigator.serviceWorker.register('./sw.js').catch(()=>{});
+            navigator.serviceWorker.register('./sw.js')
+                .then(() => DEBUG.log('setupServiceWorker', 'Service worker registered'))
+                .catch((e) => DEBUG.warn('setupServiceWorker', 'Service worker registration failed', e));
         }
     },
 
@@ -264,7 +345,7 @@ const App = {
                 const fileName = item.getAttribute('data-filename');
                 // Get the handle from IndexedDB and load it
                 if (!this.state.db) {
-                    console.error('Database not available');
+                    DEBUG.error('setupFileListHandlers', 'Database not available');
                     return;
                 }
                 const tx = this.state.db.transaction('handles');
@@ -286,7 +367,7 @@ const App = {
                 e.preventDefault();
                 const fileName = item.getAttribute('data-filename');
                 if (!this.state.db) {
-                    console.error('Database not available');
+                    DEBUG.error('setupFileListHandlers', 'Database not available');
                     return;
                 }
                 const tx = this.state.db.transaction('handles');
@@ -321,7 +402,7 @@ const App = {
 
         // --- INACTIVITY TIMER ---
         inactivityManager: {
-            INACTIVITY_THRESHOLD: 10 * 60 * 1000, // 10 minutes (GDPR best practice)
+            INACTIVITY_THRESHOLD: CONFIG.INACTIVITY_TIMEOUT_MS, // 10 minutes (GDPR best practice)
             WARNING_THRESHOLD: 30 * 1000, // Show warning 30 seconds before lock
             inactivityTimer: null,
             warningTimer: null,
@@ -403,21 +484,6 @@ const App = {
         },
 
     // --- SESSION CONTROL ---
-    unlock() {
-        const pass = document.getElementById('pass-input').value;
-        if (!pass || pass.length < 10) {
-            alert("Password must be at least 10 characters for security.");
-            return;
-        }
-        this.state.key = pass;
-        document.getElementById('unlock-overlay').classList.add('hidden');
-        document.getElementById('app-shell').classList.remove('blur');
-        document.getElementById('editor').disabled = false;
-        document.getElementById('save-status').textContent = "Session Active";
-            // Start inactivity timer for this session
-            this.inactivityManager.init();
-        },
-
     // --- MEMORY CLEANUP ---
     async cleanup() {
         // Clear crypto cache
@@ -441,16 +507,28 @@ const App = {
         }
     },
 
-    async lock() {
+    unlock() {
+        const pass = document.getElementById('pass-input').value;
+        if (!pass || pass.length < 10) {
+            alert("Password must be at least 10 characters for security.");
+            return;
+        }
+        this.state.key = pass;
+        document.getElementById('unlock-overlay').classList.add('hidden');
+        document.getElementById('app-shell').classList.remove('blur');
+        document.getElementById('editor').disabled = false;
+        document.getElementById('save-status').textContent = "Session Active";
+            // Start inactivity timer for this session
+            this.inactivityManager.init();
+        },
+
+    lock() {
         if (confirm("Lock session? You will need to re-enter your key to view notes.")) {
-            // Cleanup resources (includes clearing db, timeouts, etc.)
-            await this.cleanup();
-            
-            // Clear sensitive data
             // Note: Setting to null in JavaScript doesn't guarantee immediate memory clearing
             // Browser garbage collection may keep values in memory temporarily
             this.state.key = null;
             this.state.currentHandle = null;
+            this.state.db = null;
             location.reload(); 
         }
     },
@@ -462,21 +540,15 @@ const App = {
 
     // --- CRYPTO ENGINE ---
     async getCryptoKey(salt, iterations) {
-        const enc = new TextEncoder();
+        const saltKey = `${Array.from(salt || []).join(',')}_${iterations}`;
         
-        // Create cache key from salt and iterations (use base64 for compact representation)
-        const saltBytes = salt || enc.encode("LocalNote-Permanent-Salt-2026");
-        const saltArray = new Uint8Array(saltBytes);
-        // Use reduce to avoid stack overflow with large arrays
-        const saltBase64 = btoa(saltArray.reduce((str, byte) => str + String.fromCharCode(byte), ''));
-        const cacheKey = `${saltBase64}_${iterations || APP_CONFIG.PBKDF2_ITERATIONS}`;
-        
-        return await cryptoCache.get(cacheKey, async () => {
+        return cryptoCache.get(saltKey, async () => {
+            const enc = new TextEncoder();
             const baseKey = await crypto.subtle.importKey("raw", enc.encode(this.state.key), "PBKDF2", false, ["deriveKey"]);
             // Note: Fallback to hardcoded salt is intentional for backwards compatibility with existing files
             // New files use random per-device salts for enhanced security
             return crypto.subtle.deriveKey(
-                { name: "PBKDF2", salt: saltBytes, iterations: iterations || APP_CONFIG.PBKDF2_ITERATIONS, hash: "SHA-256" },
+                { name: "PBKDF2", salt: salt || enc.encode("LocalNote-Permanent-Salt-2026"), iterations: iterations || APP_CONFIG.PBKDF2_ITERATIONS, hash: "SHA-256" },
                 baseKey, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]
             );
         });
@@ -499,6 +571,10 @@ const App = {
 
     async decrypt(buffer) {
         try {
+            if (!buffer || buffer.length < 29) {
+                throw new Error('File too small or corrupted');
+            }
+            
             let salt, iv, ciphertext, iterations;
             
             // Check if file has version byte (new format)
@@ -518,84 +594,188 @@ const App = {
             
             const key = await this.getCryptoKey(salt, iterations);
             const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, ciphertext);
+            
+            DEBUG.log('decrypt', 'Decryption successful');
             return new TextDecoder().decode(plain);
-        } catch (e) { 
-            return "### DECRYPTION ERROR ###\nYour secret key might be wrong, or the file is corrupted."; 
+        } catch (e) {
+            DEBUG.error('decrypt', 'Decryption failed', e);
+            
+            if (e.name === 'OperationError') {
+                return "### DECRYPTION ERROR ###\nIncorrect password or corrupted file.";
+            }
+            
+            return `### DECRYPTION ERROR ###\n${e.message}`;
         }
     },
 
     // --- FILE OPERATIONS ---
     async createNote() {
         try {
+            DEBUG.log('createNote', 'Opening save file picker');
+            
             // Suggest a default filename and pre-populate with an empty encrypted note
             const h = await window.showSaveFilePicker({
                 suggestedName: 'untitled.txt',
                 types: [{ accept: {'text/plain': ['.txt']} }]
             });
+            
+            DEBUG.log('createNote', `Creating new note: ${h.name}`);
+            
             // Write default (empty) encrypted content so loadFile finds a valid file
-            try {
-                if (this.state.key) {
-                    const blob = await this.encrypt('');
-                    const stream = await h.createWritable();
-                    await stream.write(blob);
-                    await stream.close();
-                }
-            } catch (w) {
-                // ignore write errors; file may be empty
+            if (this.state.key) {
+                const blob = await this.encrypt('');
+                const stream = await h.createWritable();
+                await stream.write(blob);
+                await stream.close();
+                DEBUG.log('createNote', 'Encrypted blank content written');
             }
 
             await this.persistHandle(h);
-            this.loadFile(h);
-        } catch (e) {}
+            await this.loadFile(h);
+            
+            document.getElementById('save-status').textContent = "✓ New note created";
+            DEBUG.log('createNote', 'Note created successfully');
+        } catch (e) {
+            // Only log if not user cancellation
+            if (e.name !== 'AbortError') {
+                DEBUG.error('createNote', 'Error creating note', e);
+                document.getElementById('save-status').textContent = 
+                    `⚠️ Failed to create note: ${e.message}`;
+            } else {
+                DEBUG.log('createNote', 'User cancelled note creation');
+            }
+        }
     },
 
     async importNote() {
         try {
+            DEBUG.log('importNote', 'Opening file picker');
+            
             const [h] = await window.showOpenFilePicker();
+            DEBUG.log('importNote', `Importing file: ${h.name}`);
+            
             await this.persistHandle(h);
-            this.loadFile(h);
-        } catch (e) {}
+            await this.loadFile(h);
+            
+            document.getElementById('save-status').textContent = "✓ File imported";
+            DEBUG.log('importNote', 'File imported successfully');
+        } catch (e) {
+            // Only log if not user cancellation
+            if (e.name !== 'AbortError') {
+                DEBUG.error('importNote', 'Error importing file', e);
+                document.getElementById('save-status').textContent = 
+                    `⚠️ Failed to import file: ${e.message}`;
+            } else {
+                DEBUG.log('importNote', 'User cancelled file import');
+            }
+        }
     },
 
     async persistHandle(h) {
-        const tx = this.state.db.transaction('handles', 'readwrite');
-        await tx.objectStore('handles').put(h, h.name);
-        this.renderList();
+        try {
+            DEBUG.log('persistHandle', `Persisting handle: ${h.name}`);
+            const tx = this.state.db.transaction('handles', 'readwrite');
+            await tx.objectStore('handles').put(h, h.name);
+            await this.renderList();
+        } catch (e) {
+            DEBUG.error('persistHandle', 'Failed to persist handle', e);
+            throw new Error('Failed to save file reference: ' + e.message);
+        }
+    },
+
+    // Helper method to get handles from IndexedDB
+    async getHandlesFromDB() {
+        if (!this.state.db) {
+            DEBUG.warn('getHandlesFromDB', 'No database available');
+            return [];
+        }
+        
+        return new Promise((resolve, reject) => {
+            try {
+                const tx = this.state.db.transaction('handles', 'readonly');
+                const store = tx.objectStore('handles');
+                const req = store.getAll();
+                
+                req.onsuccess = () => {
+                    DEBUG.log('getHandlesFromDB', `Retrieved ${req.result?.length || 0} handles`);
+                    resolve(req.result || []);
+                };
+                
+                req.onerror = () => {
+                    DEBUG.error('getHandlesFromDB', 'Database read error', req.error);
+                    reject(new Error('Failed to read from database'));
+                };
+                
+                tx.onerror = () => {
+                    DEBUG.error('getHandlesFromDB', 'Transaction error', tx.error);
+                    reject(new Error('Database transaction failed'));
+                };
+            } catch (e) {
+                DEBUG.error('getHandlesFromDB', 'Error setting up request', e);
+                reject(e);
+            }
+        });
     },
 
     async loadFile(h) {
         try {
-            if (await h.queryPermission({mode: 'readwrite'}) !== 'granted') {
-                if (await h.requestPermission({mode: 'readwrite'}) !== 'granted') {
-                    document.getElementById('save-status').textContent = "⚠️ Permission denied. Cannot access this file.";
-                    return;
-                }
-            }
-            
-            const file = await h.getFile();
-            const buffer = await file.arrayBuffer();
-            
-            this.state.currentHandle = h;
-            this.state.lastMTime = file.lastModified;
-            this.state.isDirty = false;
-            
-            const decryptedContent = buffer.byteLength > 0 ? await this.decrypt(new Uint8Array(buffer)) : "";
-            
-            document.getElementById('editor').value = decryptedContent;
-            document.getElementById('active-filename').textContent = h.name;
-            document.getElementById('conflict-bar').style.display = 'none';
-            document.getElementById('save-status').textContent = "Loaded from disk";
-            this.renderList();
+            await this.withTimeout(
+                this._loadFileImpl(h),
+                CONFIG.OPERATION_TIMEOUT_MS,
+                'File loading'
+            );
         } catch (e) {
-            console.error(e);
-            document.getElementById('save-status').textContent = "⚠️ Error loading file";
+            DEBUG.error('loadFile', `Load operation failed`, e);
+            if (e.message.includes('timed out')) {
+                document.getElementById('save-status').textContent = 
+                    "⚠️ File loading took too long. Try again.";
+            } else {
+                document.getElementById('save-status').textContent = 
+                    "⚠️ Error loading file. Please try again.";
+            }
         }
     },
 
+    async _loadFileImpl(h) {
+        DEBUG.log('loadFile', `Loading file: ${h.name}`);
+        
+        if (await h.queryPermission({mode: 'readwrite'}) !== 'granted') {
+            DEBUG.log('loadFile', 'Requesting permission for file');
+            if (await h.requestPermission({mode: 'readwrite'}) !== 'granted') {
+                DEBUG.warn('loadFile', 'Permission denied for file');
+                document.getElementById('save-status').textContent = 
+                    "⚠️ Permission denied. Cannot access this file.";
+                return;
+            }
+        }
+        
+        const file = await h.getFile();
+        const buffer = await file.arrayBuffer();
+        DEBUG.log('loadFile', `File loaded: ${file.size} bytes`);
+        
+        this.state.currentHandle = h;
+        this.state.lastMTime = file.lastModified;
+        this.state.isDirty = false;
+        
+        const decryptedContent = buffer.byteLength > 0 ? await this.decrypt(new Uint8Array(buffer)) : "";
+        
+        document.getElementById('editor').value = decryptedContent;
+        document.getElementById('active-filename').textContent = h.name;
+        document.getElementById('conflict-bar').style.display = 'none';
+        document.getElementById('save-status').textContent = "Loaded from disk";
+        await this.renderList();
+        DEBUG.log('loadFile', 'File loaded and decrypted successfully');
+    },
+
     async save() {
-        if (!this.state.currentHandle || !this.state.key) return;
+        if (!this.state.currentHandle || !this.state.key) {
+            DEBUG.warn('save', 'Cannot save: no current handle or key');
+            return;
+        }
         
         try {
+            DEBUG.log('save', `Saving file: ${this.state.currentHandle.name}`);
+            
             const blob = await this.encrypt(document.getElementById('editor').value);
             const stream = await this.state.currentHandle.createWritable();
             await stream.write(blob);
@@ -605,7 +785,10 @@ const App = {
             this.state.lastMTime = f.lastModified;
             this.state.isDirty = false;
             document.getElementById('save-status').textContent = "✓ Encrypted & Saved";
+            
+            DEBUG.log('save', 'File saved successfully');
         } catch (e) {
+            DEBUG.error('save', 'Error saving file', e);
             document.getElementById('save-status').textContent = "⚠️ Error Saving";
         }
     },
@@ -613,14 +796,22 @@ const App = {
     // --- SYNC & CONFLICTS ---
     async pollDisk() {
         if (!this.state.currentHandle || !this.state.key) return;
-        const file = await this.state.currentHandle.getFile();
         
-        if (file.lastModified > this.state.lastMTime) {
-            if (this.state.isDirty) {
-                document.getElementById('conflict-bar').style.display = 'block';
-            } else {
-                this.loadFile(this.state.currentHandle); // Update silently if user isn't editing
+        try {
+            const file = await this.state.currentHandle.getFile();
+            
+            if (file.lastModified > this.state.lastMTime) {
+                DEBUG.log('pollDisk', 'File has been modified externally');
+                
+                if (this.state.isDirty) {
+                    document.getElementById('conflict-bar').style.display = 'block';
+                } else {
+                    await this.loadFile(this.state.currentHandle); // Update silently if user isn't editing
+                }
             }
+        } catch (e) {
+            DEBUG.error('pollDisk', 'Error checking file status', e);
+            // Don't show error to user for polling failures - they're background checks
         }
     },
 
@@ -634,65 +825,75 @@ const App = {
     async removeHandle(e, name) {
         e.stopPropagation();
         if (confirm(`Remove shortcut for "${name}"? The file remains on your disk.`)) {
-            const tx = this.state.db.transaction('handles', 'readwrite');
-            await tx.objectStore('handles').delete(name);
-            if (this.state.currentHandle?.name === name) {
-                this.state.currentHandle = null;
-                document.getElementById('editor').value = '';
-                document.getElementById('active-filename').textContent = 'No student selected';
+            try {
+                DEBUG.log('removeHandle', `Removing handle: ${name}`);
+                
+                const tx = this.state.db.transaction('handles', 'readwrite');
+                await tx.objectStore('handles').delete(name);
+                
+                if (this.state.currentHandle?.name === name) {
+                    this.state.currentHandle = null;
+                    document.getElementById('editor').value = '';
+                    document.getElementById('active-filename').textContent = 'No student selected';
+                }
+                
+                await this.renderList();
+                DEBUG.log('removeHandle', 'Handle removed successfully');
+            } catch (e) {
+                DEBUG.error('removeHandle', 'Failed to remove handle', e);
+                document.getElementById('save-status').textContent = "⚠️ Error removing file";
             }
-            this.renderList();
         }
     },
 
-    renderList() {
+    async renderList() {
         PERF.mark('renderList-start');
-        
         const list = document.getElementById('file-list');
         const filter = document.getElementById('search').value.toLowerCase();
         
-        this.state.db.transaction('handles').objectStore('handles').getAll().onsuccess = (e) => {
-            const results = e.target.result || [];
+        try {
+            list.innerHTML = ''; // Clear list
             
-            // Use DocumentFragment for batch DOM updates (single reflow)
-            const fragment = document.createDocumentFragment();
-            
-            if (results.length) {
-                const sorted = results.sort((a,b) => a.name.localeCompare(b.name));
-                sorted.forEach(h => {
-                    if (filter && !h.name.toLowerCase().includes(filter)) return;
-
-                    const item = document.createElement('div');
-                    item.className = `file-item ${this.state.currentHandle?.name === h.name ? 'active' : ''}`;
-                    item.setAttribute('data-filename', h.name);
-                    item.setAttribute('tabindex', '0');
-                    item.setAttribute('role', 'button');
-                    item.setAttribute('aria-label', `Open file ${h.name}`);
-                    
-                    // Create filename span with textContent to prevent XSS
-                    const nameSpan = document.createElement('span');
-                    nameSpan.style.overflow = 'hidden';
-                    nameSpan.style.textOverflow = 'ellipsis';
-                    nameSpan.textContent = h.name;
-                    
-                    // Create remove button
-                    const removeBtn = document.createElement('span');
-                    removeBtn.className = 'remove-btn';
-                    removeBtn.setAttribute('aria-label', `Remove ${h.name}`);
-                    removeBtn.textContent = '✕';
-                    
-                    item.appendChild(nameSpan);
-                    item.appendChild(removeBtn);
-                    fragment.appendChild(item);
-                });
+            if (!this.state.db) {
+                list.innerHTML = '<p style="color: var(--text-sub);">Local storage unavailable</p>';
+                DEBUG.warn('renderList', 'Cannot render list - no database');
+                return;
             }
             
-            // Single reflow: replace entire list at once
-            list.replaceChildren(fragment);
+            const results = await this.getHandlesFromDB();
+            const sorted = results.sort((a, b) => a.name.localeCompare(b.name));
             
+            // Use DocumentFragment to avoid multiple reflows
+            const fragment = document.createDocumentFragment();
+            
+            sorted.forEach(h => {
+                if (filter && !h.name.toLowerCase().includes(filter)) return;
+                
+                const item = document.createElement('div');
+                item.className = `file-item ${this.state.currentHandle?.name === h.name ? 'active' : ''}`;
+                item.setAttribute('data-filename', h.name);
+                item.setAttribute('tabindex', '0');
+                item.innerHTML = `
+                    <span style="overflow:hidden; text-overflow:ellipsis;">${h.name}</span>
+                    <span class="remove-btn">✕</span>
+                `;
+                
+                fragment.appendChild(item);
+            });
+            
+            list.appendChild(fragment);
+            
+            if (sorted.length === 0) {
+                list.innerHTML = '<p style="color: var(--text-sub);">No files yet. Create one to start.</p>';
+            }
+            
+            DEBUG.log('renderList', `Rendered ${sorted.length} files`);
             PERF.mark('renderList-end');
             PERF.measure('renderList', 'renderList-start', 'renderList-end');
-        };
+        } catch (e) {
+            DEBUG.error('renderList', 'Error rendering file list', e);
+            list.innerHTML = '<p style="color: var(--danger);">Error loading file list</p>';
+        }
     }
 };
 
@@ -701,7 +902,7 @@ document.getElementById('editor').oninput = () => {
     App.state.isDirty = true;
     document.getElementById('save-status').textContent = "● Editing...";
     clearTimeout(App.state.saveTimeout);
-    App.state.saveTimeout = setTimeout(() => App.save(), 1000);
+    App.state.saveTimeout = setTimeout(() => App.save(), CONFIG.AUTO_SAVE_DELAY_MS);
 };
 
 // Enter key support for password input
