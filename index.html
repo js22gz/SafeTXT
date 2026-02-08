@@ -242,7 +242,6 @@
                     onclick="App.togglePass()" 
                     class="password-toggle-btn"
                     aria-label="Show password"
-                    aria-pressed="false"
                     title="Toggle password visibility">👁️</button>
         </div>
         <p id="password-help" class="input-help">Minimum 10 characters required for security</p>
@@ -462,7 +461,6 @@ const App = {
         
         el.type = isPassword ? 'text' : 'password';
         btn.setAttribute('aria-label', isPassword ? 'Hide password' : 'Show password');
-        btn.setAttribute('aria-pressed', isPassword ? 'true' : 'false');
     },
 
     // --- CRYPTO ENGINE ---
@@ -659,9 +657,10 @@ const App = {
                 const item = document.createElement('button');
                 item.className = `file-item ${isActive ? 'active' : ''}`;
                 item.type = 'button';
-                item.setAttribute('role', 'listitem');
-                item.setAttribute('aria-pressed', isActive ? 'true' : 'false');
                 item.setAttribute('aria-label', `Open ${h.name}`);
+                if (isActive) {
+                    item.setAttribute('aria-current', 'page');
+                }
                 item.onclick = () => this.loadFile(h);
                 
                 // File name span
@@ -704,10 +703,10 @@ const App = {
             const item = e.target.closest('.file-item');
             if (!item) return;
             
-            if (e.key === 'Enter' || e.key === ' ') {
+            if (e.key === 'Enter') {
                 e.preventDefault();
                 item.click();
-            } else if (e.key === 'Delete' || e.key === 'Backspace') {
+            } else if (e.key === 'Delete') {
                 e.preventDefault();
                 const removeBtn = item.querySelector('.remove-btn');
                 if (removeBtn) removeBtn.click();
