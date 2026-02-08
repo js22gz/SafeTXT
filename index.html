@@ -4,6 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="theme-color" content="#1a73e8">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'">
+    <meta name="referrer" content="no-referrer">
     <title>SafeTXT</title>
     <link rel="manifest" href="manifest.json">
     <style>
@@ -133,7 +135,7 @@
 
 <script>
 const APP_CONFIG = {
-    VERSION: '1.0',
+    VERSION: '1.1',
     FILE_FORMAT_VERSION: 0x01,
     SALT_LENGTH: 16,
     IV_LENGTH: 12,
@@ -310,9 +312,27 @@ const App = {
         clearTimeout(this.state.saveTimeout);
         clearTimeout(this.state.searchTimeout);
         this.inactivityManager.cleanup();
-        if (this.state.db) { this.state.db.close(); this.state.db = null; }
+
+        // Clear sensitive data from memory before reload tears down JS heap.
+        // JS strings are immutable so old values persist until GC; overwriting
+        // DOM fields with random data encourages the engine to release them.
+        const randomPad = crypto.getRandomValues(new Uint8Array(64)).toString();
+        document.getElementById('editor').value = randomPad;
+        document.getElementById('editor').value = '';
+        document.getElementById('pass-input').value = randomPad;
+        document.getElementById('pass-input').value = '';
         this.state.key = null;
         this.state.currentHandle = null;
+        this.state.isDirty = false;
+        this.state.lastMTime = 0;
+
+        if (this.state.db) { this.state.db.close(); this.state.db = null; }
+
+        // Instruct service worker to purge cached app content
+        if (navigator.serviceWorker && navigator.serviceWorker.controller) {
+            navigator.serviceWorker.controller.postMessage({ type: 'CLEAR_CACHE' });
+        }
+
         location.reload();
     },
 
@@ -512,11 +532,15 @@ const App = {
         const filter = document.getElementById('search').value.toLowerCase();
 
         if (!this.state.db) {
-            list.innerHTML = '<p style="color: var(--text-sub);">Local storage unavailable</p>';
+            list.textContent = '';
+            const p = document.createElement('p');
+            p.style.color = 'var(--text-sub)';
+            p.textContent = 'Local storage unavailable';
+            list.appendChild(p);
             return;
         }
 
-        list.innerHTML = '';
+        list.textContent = '';
 
         try {
             const results = await this.getHandlesFromDB();
@@ -552,10 +576,18 @@ const App = {
             list.appendChild(fragment);
 
             if (sorted.length === 0) {
-                list.innerHTML = '<p style="color: var(--text-sub);">No files yet. Create one to start.</p>';
+                list.textContent = '';
+                const p = document.createElement('p');
+                p.style.color = 'var(--text-sub)';
+                p.textContent = 'No files yet. Create one to start.';
+                list.appendChild(p);
             }
         } catch (e) {
-            list.innerHTML = '<p style="color: var(--danger);">Error loading file list</p>';
+            list.textContent = '';
+            const p = document.createElement('p');
+            p.style.color = 'var(--danger)';
+            p.textContent = 'Error loading file list';
+            list.appendChild(p);
         }
     }
 };
