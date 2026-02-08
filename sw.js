@@ -123,8 +123,10 @@ self.addEventListener('fetch', (e) => {
 // Message handler: allows the app to clear cached content on session lock
 self.addEventListener('message', (e) => {
   if (e.data && e.data.type === 'CLEAR_CACHE') {
-    caches.delete(CACHE_NAME).then(() => {
-      console.log('[Service Worker] Cache cleared on session lock');
-    });
+    e.waitUntil(
+      caches.delete(CACHE_NAME).then(() => {
+        console.log('[Service Worker] Cache cleared on session lock');
+      })
+    );
   }
 });

@@ -313,8 +313,13 @@ const App = {
         clearTimeout(this.state.searchTimeout);
         this.inactivityManager.cleanup();
 
-        // Clear sensitive data from memory
+        // Clear sensitive data from memory before reload tears down JS heap.
+        // JS strings are immutable so old values persist until GC; overwriting
+        // DOM fields with random data encourages the engine to release them.
+        const randomPad = crypto.getRandomValues(new Uint8Array(64)).toString();
+        document.getElementById('editor').value = randomPad;
         document.getElementById('editor').value = '';
+        document.getElementById('pass-input').value = randomPad;
         document.getElementById('pass-input').value = '';
         this.state.key = null;
         this.state.currentHandle = null;
