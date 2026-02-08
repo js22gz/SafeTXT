@@ -543,7 +543,8 @@ const App = {
     // --- CRYPTO ENGINE ---
     async getCryptoKey(salt, iterations) {
         // Create efficient cache key using base64 encoding
-        const saltKey = salt ? btoa(String.fromCharCode.apply(null, salt)) : 'default';
+        // Using Array.from to avoid stack overflow with large arrays
+        const saltKey = salt ? btoa(Array.from(salt, byte => String.fromCharCode(byte)).join('')) : 'default';
         const cacheKey = `${saltKey}_${iterations}`;
         
         return cryptoCache.get(cacheKey, async () => {
@@ -890,7 +891,7 @@ const App = {
                 const removeBtn = document.createElement('span');
                 removeBtn.className = 'remove-btn';
                 removeBtn.textContent = '✕';
-                removeBtn.setAttribute('aria-label', `Remove ${h.name}`);
+                removeBtn.setAttribute('aria-label', `Remove file ${h.name}`);
                 removeBtn.setAttribute('role', 'button');
                 
                 item.appendChild(nameSpan);
