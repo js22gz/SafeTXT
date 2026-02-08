@@ -1,12 +1,12 @@
-SAFE.TXT 🔐
+SAFE.TXT
 
+The Product: 
 SAFE.TXT is a "Zero-Knowledge" Progressive Web App (PWA) designed for GDPR-compliant note-taking in educational environments. It enables teachers to record sensitive student observations with high-grade local encryption before the data ever touches the cloud.
 
-🛡️ The Mission
-
+The Mission:
 Educational professionals often handle sensitive data that requires higher protection than standard cloud documents offer. SAFE.TXT bridges the gap between digital convenience and strict data sovereignty by ensuring that plaintext data never leaves the teacher's device.
 
-🚀 Key Features
+Functionality and Key Features
 
 Edge Encryption: Data is encrypted in the browser memory using AES-GCM 256 via the Web Crypto API.
 
