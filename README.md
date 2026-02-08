@@ -1,5 +1,7 @@
 SAFE.TXT
 
+[![Hits](https://hits.sh/github.com/js22gz/SafeTXT.svg?style=flat&label=repo-visits&color=1a73e8)](https://hits.sh/github.com/js22gz/SafeTXT/)
+
 The Product: 
 SAFE.TXT is a "Zero-Knowledge" Progressive Web App (PWA) designed for GDPR-compliant note-taking in educational environments. It enables teachers to record sensitive student observations with high-grade local encryption before the data ever touches the cloud.
 
@@ -50,3 +52,19 @@ Attribution — You must give appropriate credit to the original creator, provid
 To view a copy of this license, visit http://creativecommons.org/licenses/by/4.0/.
 
 Created for secure, sovereign, and simple educational documentation.
+
+📊 Privacy-Respecting Usage Awareness
+
+SafeTXT is committed to "no tracking, no cookies, and no telemetry" for its users. At the same time, it is useful for the developer to know whether the app is being used at all.
+
+To balance these goals, SafeTXT uses a simple anonymous page load counter (via hits.sh) that:
+
+- Increments a single number each time the page is loaded
+- Collects zero personal data (no IP logging, no fingerprinting, no user identification)
+- Uses no cookies or local storage for tracking
+- Is fully visible and transparent to users on the unlock screen
+- Is open source (https://github.com/silkky/hits)
+
+This counter does not conflict with the "no tracking" promise because it tracks no individuals and collects no personal information. It simply answers one question: "Is anyone loading this page?"
+
+Additionally, repository owners can use GitHub's built-in Traffic Insights (Settings → Insights → Traffic) to see visitor counts and referral sources for the repository itself, with no code changes required.
