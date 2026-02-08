@@ -22,6 +22,7 @@ self.addEventListener('install', (e) => {
       })
       .catch(err => {
         console.error('[Service Worker] Install failed:', err);
+        throw err; // Propagate error to fail installation
       })
   );
 });
@@ -59,11 +60,16 @@ self.addEventListener('fetch', (e) => {
         if (response) {
           return response;
         }
-        return fetch(e.request);
-      })
-      .catch(err => {
-        console.warn('[Service Worker] Network failed for:', e.request.url);
-        // Could return offline fallback page here in future
+        // No cache, try network
+        return fetch(e.request).catch(err => {
+          console.warn('[Service Worker] Network failed for:', e.request.url);
+          // Return a basic error response
+          return new Response('Offline - Resource not cached', {
+            status: 503,
+            statusText: 'Service Unavailable',
+            headers: new Headers({ 'Content-Type': 'text/plain' })
+          });
+        });
       })
   );
 });
