@@ -279,7 +279,7 @@ const App = {
     unlock() {
         const pass = document.getElementById('pass-input').value;
         if (!pass || pass.length < 10) {
-            alert("Password must be at least 10 characters (NIST 2024 guidelines for sensitive data).");
+            alert("Password must be at least 10 characters for security.");
             return;
         }
         this.state.key = pass;
@@ -293,7 +293,8 @@ const App = {
 
     lock() {
         if (confirm("Lock session? You will need to re-enter your key to view notes.")) {
-            // Explicitly clear encryption key and handles from memory
+            // Note: Setting to null in JavaScript doesn't guarantee immediate memory clearing
+            // Browser garbage collection may keep values in memory temporarily
             this.state.key = null;
             this.state.currentHandle = null;
             this.state.db = null;
@@ -310,6 +311,8 @@ const App = {
     async getCryptoKey(salt, iterations) {
         const enc = new TextEncoder();
         const baseKey = await crypto.subtle.importKey("raw", enc.encode(this.state.key), "PBKDF2", false, ["deriveKey"]);
+        // Note: Fallback to hardcoded salt is intentional for backwards compatibility with existing files
+        // New files use random per-device salts for enhanced security
         return crypto.subtle.deriveKey(
             { name: "PBKDF2", salt: salt || enc.encode("LocalNote-Permanent-Salt-2026"), iterations: iterations || APP_CONFIG.PBKDF2_ITERATIONS, hash: "SHA-256" },
             baseKey, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]
