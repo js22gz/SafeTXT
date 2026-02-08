@@ -185,7 +185,7 @@ const PERF = {
 
 // Crypto key caching to reduce re-derivation overhead
 class CryptoCache {
-    constructor(ttl = 60000) { // 60000ms (60 second) TTL
+    constructor(ttl = 60000) { // 60000ms (60 seconds) TTL
         this.cache = {};
         this.ttl = ttl;
     }
@@ -263,6 +263,10 @@ const App = {
             if (item) {
                 const fileName = item.getAttribute('data-filename');
                 // Get the handle from IndexedDB and load it
+                if (!this.state.db) {
+                    console.error('Database not available');
+                    return;
+                }
                 const tx = this.state.db.transaction('handles');
                 const req = tx.objectStore('handles').get(fileName);
                 req.onsuccess = () => {
@@ -281,6 +285,10 @@ const App = {
             if (e.key === 'Enter' || e.key === ' ') {
                 e.preventDefault();
                 const fileName = item.getAttribute('data-filename');
+                if (!this.state.db) {
+                    console.error('Database not available');
+                    return;
+                }
                 const tx = this.state.db.transaction('handles');
                 const req = tx.objectStore('handles').get(fileName);
                 req.onsuccess = () => {
@@ -384,6 +392,13 @@ const App = {
                 this.hideWarning();
                 alert("Your session has been locked due to inactivity. Please re-enter your secret to continue.");
                 App.lock();
+            },
+            
+            cleanup() {
+                clearTimeout(this.inactivityTimer);
+                clearTimeout(this.warningTimer);
+                clearInterval(this.warningCountdown);
+                this.hideWarning();
             }
         },
 
@@ -417,9 +432,7 @@ const App = {
         }
         
         // Clear inactivity timers
-        clearTimeout(this.inactivityManager.inactivityTimer);
-        clearTimeout(this.inactivityManager.warningTimer);
-        clearInterval(this.inactivityManager.warningCountdown);
+        this.inactivityManager.cleanup();
         
         // Clear database reference
         if (this.state.db) {
