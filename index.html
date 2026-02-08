@@ -27,11 +27,16 @@
         .file-item { 
             display: flex; justify-content: space-between; align-items: center;
             padding: 10px; border-radius: 6px; cursor: pointer; font-size: 14px; margin-bottom: 2px;
+            background: none; border: none; text-align: left; width: 100%;
         }
         .file-item:hover { background: #e8eaed; }
         .file-item.active { background: #e8f0fe; color: var(--accent); font-weight: 600; }
-        .remove-btn { color: #ccc; font-size: 18px; padding: 0 5px; transition: color 0.2s; }
-        .remove-btn:hover { color: var(--danger); }
+        .remove-btn { 
+            color: #ccc; font-size: 18px; padding: 4px 8px; transition: color 0.2s; 
+            border: none; background: none; cursor: pointer; border-radius: 4px;
+        }
+        .remove-btn:hover { color: var(--danger); background: #f1f3f4; }
+        .remove-btn:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
 
         /* Main Stage */
         main { display: flex; flex-direction: column; background: var(--bg); position: relative; }
@@ -56,6 +61,114 @@
         
         .input-text { width: 100%; padding: 12px; border: 1px solid var(--border); border-radius: 6px; margin-bottom: 16px; font-size: 16px; outline-color: var(--accent); }
         .hidden { display: none !important; }
+
+        /* Accessibility - Focus Indicators (WCAG 2.1 AA) */
+        input:focus,
+        button:focus,
+        textarea:focus,
+        .btn:focus {
+            outline: 3px solid var(--accent);
+            outline-offset: 2px;
+        }
+
+        .file-item:focus {
+            outline: 2px solid var(--accent);
+            outline-offset: -2px;
+            background: #e8f0fe;
+        }
+
+        /* Accessibility - Visually Hidden (Screen Readers Only) */
+        .visually-hidden {
+            position: absolute;
+            width: 1px;
+            height: 1px;
+            padding: 0;
+            margin: -1px;
+            overflow: hidden;
+            clip: rect(0, 0, 0, 0);
+            white-space: nowrap;
+            border-width: 0;
+        }
+
+        /* Accessibility - Skip Links */
+        .skip-links {
+            position: absolute;
+            width: 1px;
+            height: 1px;
+            padding: 0;
+            margin: -1px;
+            overflow: hidden;
+            clip: rect(0, 0, 0, 0);
+            white-space: nowrap;
+            border-width: 0;
+        }
+
+        .skip-links:focus-within {
+            position: static;
+            width: auto;
+            height: auto;
+            padding: 12px;
+            margin: 0;
+            overflow: visible;
+            clip: auto;
+            white-space: normal;
+            background: var(--accent);
+            color: white;
+            z-index: 9999;
+            display: flex;
+            gap: 16px;
+        }
+
+        .skip-links a {
+            color: white;
+            text-decoration: none;
+            padding: 8px 12px;
+            border-radius: 4px;
+        }
+
+        .skip-links a:hover,
+        .skip-links a:focus {
+            background: #1765cc;
+            outline: 2px solid white;
+        }
+
+        /* Password Toggle Button */
+        .password-toggle-btn {
+            position: absolute;
+            right: 10px;
+            top: 12px;
+            border: none;
+            background: none;
+            cursor: pointer;
+            font-size: 18px;
+            padding: 4px 8px;
+        }
+
+        .password-toggle-btn:hover {
+            background: #f1f3f4;
+            border-radius: 4px;
+        }
+
+        /* Input Help Text */
+        .input-help {
+            font-size: 12px;
+            color: var(--text-sub);
+            margin-top: -12px;
+            margin-bottom: 16px;
+            line-height: 1.4;
+        }
+
+        /* Input Error */
+        .input-error {
+            color: var(--danger);
+            font-size: 12px;
+            margin-top: -12px;
+            margin-bottom: 16px;
+            padding: 8px;
+            background: #fce8e6;
+            border-radius: 4px;
+            border-left: 3px solid var(--danger);
+        }
     </style>
             <!-- Inactivity Warning Overlay -->
             <style>
@@ -104,15 +217,35 @@
 </head>
 <body>
 
-<div id="unlock-overlay" class="overlay">
+<!-- Skip Links for Keyboard Navigation (WCAG 2.1 AA) -->
+<nav class="skip-links" aria-label="Skip links">
+    <a href="#editor">Skip to editor</a>
+    <a href="#file-list">Skip to file list</a>
+</nav>
+
+<div id="unlock-overlay" class="overlay" role="dialog" aria-labelledby="unlock-title" aria-describedby="unlock-desc" aria-modal="true">
     <div class="card">
-        <h2 style="margin-top:0">LocalNote Secure</h2>
-        <p style="color: var(--text-sub); margin-bottom: 24px;">Enter your <strong>Shared Encryption Secret</strong> to unlock student notes for this session.</p>
+        <h2 id="unlock-title" style="margin-top:0">LocalNote Secure</h2>
+        <p id="unlock-desc" style="color: var(--text-sub); margin-bottom: 24px;">Enter your <strong>Shared Encryption Secret</strong> to unlock student notes for this session.</p>
         
         <div style="position: relative;">
-            <input type="password" id="pass-input" class="input-text" placeholder="Secret Key...">
-            <button type="button" onclick="App.togglePass()" style="position: absolute; right: 10px; top: 12px; border:none; background:none; cursor:pointer;">👁️</button>
+            <label for="pass-input" class="visually-hidden">Shared Encryption Secret</label>
+            <input type="password" 
+                   id="pass-input" 
+                   class="input-text" 
+                   placeholder="Secret Key..."
+                   aria-label="Shared Encryption Secret"
+                   aria-describedby="password-help"
+                   aria-required="true">
+            <button type="button" 
+                    id="password-toggle"
+                    onclick="App.togglePass()" 
+                    class="password-toggle-btn"
+                    aria-label="Show password"
+                    aria-pressed="false"
+                    title="Toggle password visibility">👁️</button>
         </div>
+        <p id="password-help" class="input-help">Minimum 10 characters required for security</p>
         
         <button class="btn btn-primary" style="width:100%; padding: 14px;" onclick="App.unlock()">Unlock Session</button>
         
@@ -129,10 +262,11 @@
         <button class="btn btn-outline" onclick="App.importNote()">📂 Open Existing File</button>
         
         <div class="sidebar-label">Search Student</div>
-        <input type="text" id="search" class="input-text" style="margin-bottom:4px" placeholder="Type to filter..." oninput="App.renderList()">
+        <label for="search" class="visually-hidden">Search student notes</label>
+        <input type="text" id="search" class="input-text" style="margin-bottom:4px" placeholder="Type to filter..." oninput="App.renderList()" aria-label="Search student notes">
         
         <div class="sidebar-label">Recently Opened</div>
-        <div id="file-list"></div>
+        <div id="file-list" role="list" aria-label="Recently opened files"></div>
 
         <button class="btn btn-outline" style="margin-top:auto; border-color: #f5c2c7; color: var(--danger)" onclick="App.lock()">🔒 Lock & Clear Session</button>
     </aside>
@@ -145,11 +279,15 @@
             <div id="active-filename" style="font-weight: 600; font-size: 16px;">No student selected</div>
             <div id="save-status" style="font-size: 12px; color: var(--text-sub)">Ready</div>
         </header>
-        <textarea id="editor" placeholder="Select a note or create one to begin..." disabled></textarea>
-    <div id="inactivity-warning" class="hidden">
+        <textarea id="editor" placeholder="Select a note or create one to begin..." disabled aria-label="Note editor"></textarea>
+    <div id="inactivity-warning" 
+         class="hidden"
+         role="alert"
+         aria-live="assertive"
+         aria-atomic="true">
         <h3>⚠️ Inactivity Detected</h3>
         <p>Your session will lock in:</p>
-        <div id="inactivity-timer">0:30</div>
+        <div id="inactivity-timer" aria-live="polite">0:30</div>
         <button class="btn btn-primary" onclick="App.inactivityManager.resetTimer()">I'm Still Here</button>
         <p style="font-size: 12px; margin-top: 12px; color: #856404;">No action in 10 minutes will lock your session for security.</p>
     </div>
@@ -278,8 +416,23 @@ const App = {
     // --- SESSION CONTROL ---
     unlock() {
         const pass = document.getElementById('pass-input').value;
+        const passInput = document.getElementById('pass-input');
+        
+        // Clear any existing error messages
+        const existingError = passInput.parentElement.querySelector('.input-error');
+        if (existingError) {
+            existingError.remove();
+        }
+        
         if (!pass || pass.length < 10) {
-            alert("Password must be at least 10 characters for security.");
+            // Create inline error message with ARIA
+            const errorEl = document.createElement('div');
+            errorEl.className = 'input-error';
+            errorEl.setAttribute('role', 'alert');
+            errorEl.setAttribute('aria-live', 'polite');
+            errorEl.textContent = '⚠️ Password must be at least 10 characters for security.';
+            passInput.parentElement.appendChild(errorEl);
+            passInput.focus();
             return;
         }
         this.state.key = pass;
@@ -304,7 +457,12 @@ const App = {
 
     togglePass() {
         const el = document.getElementById('pass-input');
-        el.type = el.type === 'password' ? 'text' : 'password';
+        const btn = document.getElementById('password-toggle');
+        const isPassword = el.type === 'password';
+        
+        el.type = isPassword ? 'text' : 'password';
+        btn.setAttribute('aria-label', isPassword ? 'Hide password' : 'Show password');
+        btn.setAttribute('aria-pressed', isPassword ? 'true' : 'false');
     },
 
     // --- CRYPTO ENGINE ---
@@ -495,16 +653,68 @@ const App = {
             sorted.forEach(h => {
                 if (filter && !h.name.toLowerCase().includes(filter)) return;
 
-                const item = document.createElement('div');
-                item.className = `file-item ${this.state.currentHandle?.name === h.name ? 'active' : ''}`;
+                const isActive = this.state.currentHandle?.name === h.name;
+                
+                // Create button element (semantic HTML)
+                const item = document.createElement('button');
+                item.className = `file-item ${isActive ? 'active' : ''}`;
+                item.type = 'button';
+                item.setAttribute('role', 'listitem');
+                item.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+                item.setAttribute('aria-label', `Open ${h.name}`);
                 item.onclick = () => this.loadFile(h);
-                item.innerHTML = `
-                    <span style="overflow:hidden; text-overflow:ellipsis;">${h.name}</span>
-                    <span class="remove-btn" onclick="App.removeHandle(event, '${h.name}')">✕</span>
-                `;
+                
+                // File name span
+                const nameSpan = document.createElement('span');
+                nameSpan.style.overflow = 'hidden';
+                nameSpan.style.textOverflow = 'ellipsis';
+                nameSpan.textContent = h.name;
+                
+                // Remove button
+                const removeBtn = document.createElement('button');
+                removeBtn.className = 'remove-btn';
+                removeBtn.type = 'button';
+                removeBtn.setAttribute('aria-label', `Remove ${h.name}`);
+                removeBtn.textContent = '✕';
+                removeBtn.onclick = (e) => {
+                    e.stopPropagation();
+                    this.removeHandle(e, h.name);
+                };
+                
+                item.appendChild(nameSpan);
+                item.appendChild(removeBtn);
                 list.appendChild(item);
             });
+            
+            // Setup keyboard navigation for file list
+            this.setupFileListKeyboard();
         };
+    },
+    
+    // Keyboard navigation for file list (WCAG 2.1 AA)
+    setupFileListKeyboard() {
+        const fileList = document.getElementById('file-list');
+        
+        // Remove existing listener if any
+        if (fileList._keydownHandler) {
+            fileList.removeEventListener('keydown', fileList._keydownHandler);
+        }
+        
+        fileList._keydownHandler = (e) => {
+            const item = e.target.closest('.file-item');
+            if (!item) return;
+            
+            if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                item.click();
+            } else if (e.key === 'Delete' || e.key === 'Backspace') {
+                e.preventDefault();
+                const removeBtn = item.querySelector('.remove-btn');
+                if (removeBtn) removeBtn.click();
+            }
+        };
+        
+        fileList.addEventListener('keydown', fileList._keydownHandler);
     }
 };
 
