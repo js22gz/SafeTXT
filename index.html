@@ -3,6 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#1a73e8">
     <title>SafeTXT</title>
     <link rel="manifest" href="manifest.json">
     <style>
@@ -84,7 +85,7 @@
         
         <div style="position: relative;">
             <input type="password" id="pass-input" class="input-text" placeholder="Secret Key...">
-            <button type="button" onclick="App.togglePass()" style="position: absolute; right: 10px; top: 12px; border:none; background:none; cursor:pointer;">👁️</button>
+            <button type="button" onclick="App.togglePass()" aria-label="Toggle password visibility" style="position: absolute; right: 10px; top: 12px; border:none; background:none; cursor:pointer;">👁️</button>
         </div>
         
         <button class="btn btn-primary" style="width:100%; padding: 14px;" onclick="App.unlock()">Unlock Session</button>
@@ -93,6 +94,7 @@
             Data is encrypted locally using AES-GCM 256. <br>
             Files on Cloud based Drives stay encrypted and private.
         </p>
+        <p id="app-version" style="font-size: 11px; color: var(--border); margin-top: 12px;"></p>
     </div>
 </div>
 
@@ -131,6 +133,7 @@
 
 <script>
 const APP_CONFIG = {
+    VERSION: '1.0',
     FILE_FORMAT_VERSION: 0x01,
     SALT_LENGTH: 16,
     IV_LENGTH: 12,
@@ -274,8 +277,7 @@ const App = {
 
         lockSession() {
             this.hideWarning();
-            alert("Session locked due to inactivity. Re-enter your secret to continue.");
-            App.lock();
+            App.lock(true);
         },
 
         cleanup() {
@@ -301,16 +303,15 @@ const App = {
         this.inactivityManager.init();
     },
 
-    async lock() {
-        if (confirm("Lock session? You will need to re-enter your key to view notes.")) {
-            clearTimeout(this.state.saveTimeout);
-            clearTimeout(this.state.searchTimeout);
-            this.inactivityManager.cleanup();
-            if (this.state.db) { this.state.db.close(); this.state.db = null; }
-            this.state.key = null;
-            this.state.currentHandle = null;
-            location.reload();
-        }
+    async lock(force = false) {
+        if (!force && !confirm("Lock session? You will need to re-enter your key to view notes.")) return;
+        clearTimeout(this.state.saveTimeout);
+        clearTimeout(this.state.searchTimeout);
+        this.inactivityManager.cleanup();
+        if (this.state.db) { this.state.db.close(); this.state.db = null; }
+        this.state.key = null;
+        this.state.currentHandle = null;
+        location.reload();
     },
 
     togglePass() {
@@ -569,6 +570,9 @@ document.getElementById('editor').oninput = () => {
 document.getElementById('pass-input').addEventListener('keypress', (e) => {
     if (e.key === 'Enter') App.unlock();
 });
+
+// Set version display
+document.getElementById('app-version').textContent = `v${APP_CONFIG.VERSION}`;
 
 // Boot
 App.init();
