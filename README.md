@@ -22,7 +22,14 @@ Privacy by Design: No tracking, no cookies, and no telemetry.
 
 Architecture: Single-file HTML/JS SPA (Single Page Application).
 
-Security: PBKDF2 key derivation with 100,000 iterations and a fixed municipal salt.
+Security: 
+- PBKDF2 key derivation with 600,000 iterations (FIPS-140 compliant, 6x stronger than previous 100k)
+- Per-device random salt for each encrypted file
+- AES-GCM 256-bit encryption
+- Minimum 10-character password requirement (NIST 2024 guidelines)
+- 10-minute inactivity timeout (GDPR best practice)
+- File format versioning for future-proof encryption updates
+- Explicit session key memory clearing on lock
 
 PWA Ready: Full offline support via Service Workers; installable as a native app on Chrome OS, Windows, and macOS.
 
