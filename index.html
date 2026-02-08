@@ -129,7 +129,7 @@
         <button class="btn btn-outline" onclick="App.importNote()">📂 Open Existing File</button>
         
         <div class="sidebar-label">Search Student</div>
-        <input type="text" id="search" class="input-text" style="margin-bottom:4px" placeholder="Type to filter..." oninput="App.renderList()">
+        <input type="text" id="search" class="input-text" style="margin-bottom:4px" placeholder="Type to filter...">
         
         <div class="sidebar-label">Recently Opened</div>
         <div id="file-list"></div>
@@ -169,6 +169,46 @@ const APP_CONFIG = {
     PBKDF2_ITERATIONS: 600000    // FIPS-140 compliant iteration count
 };
 
+// Performance monitoring utilities
+const PERF = {
+    mark: (label) => performance.mark(label),
+    measure: (label, startMark, endMark) => {
+        try {
+            performance.measure(label, startMark, endMark);
+            const measure = performance.getEntriesByName(label)[0];
+            console.log(`[PERF] ${label}: ${measure.duration.toFixed(2)}ms`);
+        } catch (e) {
+            console.warn('Performance measurement failed:', e);
+        }
+    }
+};
+
+// Crypto key caching to reduce re-derivation overhead
+class CryptoCache {
+    constructor(ttl = 60000) { // 60 second TTL
+        this.cache = {};
+        this.ttl = ttl;
+    }
+    
+    async get(key, fn) {
+        const now = Date.now();
+        
+        if (this.cache[key] && now - this.cache[key].time < this.ttl) {
+            return this.cache[key].value;
+        }
+        
+        const value = await fn();
+        this.cache[key] = { value, time: now };
+        return value;
+    }
+    
+    clear() {
+        this.cache = {};
+    }
+}
+
+const cryptoCache = new CryptoCache(60000);
+
 const App = {
     state: {
         db: null,
@@ -187,6 +227,12 @@ const App = {
             req.onsuccess = () => res(req.result);
         });
         
+        // Setup event delegation for file list
+        this.setupFileListHandlers();
+        
+        // Setup search input with debouncing
+        this.setupSearchInput();
+        
         this.renderList();
         
         // Background Polling for Cloud Sync Conflicts
@@ -196,7 +242,73 @@ const App = {
         if ('serviceWorker' in navigator) {
             navigator.serviceWorker.register('./sw.js').catch(()=>{});
         }
-                // Removed incomplete line
+    },
+
+    // --- EVENT DELEGATION ---
+    setupFileListHandlers() {
+        const fileList = document.getElementById('file-list');
+        
+        // Single click listener for entire list using event delegation
+        fileList.addEventListener('click', (e) => {
+            const removeBtn = e.target.closest('.remove-btn');
+            if (removeBtn) {
+                const item = removeBtn.closest('.file-item');
+                const fileName = item.getAttribute('data-filename');
+                this.removeHandle(e, fileName);
+                return;
+            }
+            
+            const item = e.target.closest('.file-item');
+            if (item) {
+                const fileName = item.getAttribute('data-filename');
+                // Get the handle from IndexedDB and load it
+                const tx = this.state.db.transaction('handles');
+                const req = tx.objectStore('handles').get(fileName);
+                req.onsuccess = () => {
+                    if (req.result) {
+                        this.loadFile(req.result);
+                    }
+                };
+            }
+        });
+        
+        // Keyboard navigation support
+        fileList.addEventListener('keydown', (e) => {
+            const item = e.target.closest('.file-item');
+            if (!item) return;
+            
+            if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                const fileName = item.getAttribute('data-filename');
+                const tx = this.state.db.transaction('handles');
+                const req = tx.objectStore('handles').get(fileName);
+                req.onsuccess = () => {
+                    if (req.result) {
+                        this.loadFile(req.result);
+                    }
+                };
+            } else if (e.key === 'Delete' || e.key === 'Backspace') {
+                e.preventDefault();
+                const fileName = item.getAttribute('data-filename');
+                this.removeHandle(e, fileName);
+            }
+        });
+    },
+
+    // --- SEARCH DEBOUNCING ---
+    setupSearchInput() {
+        const searchInput = document.getElementById('search');
+        let searchTimeout;
+        
+        searchInput.addEventListener('input', (e) => {
+            // Cancel previous timeout
+            clearTimeout(searchTimeout);
+            
+            // Wait 300ms after user stops typing
+            searchTimeout = setTimeout(() => {
+                this.renderList();
+            }, 300);
+        });
     },
 
         // --- INACTIVITY TIMER ---
@@ -291,13 +403,37 @@ const App = {
             this.inactivityManager.init();
         },
 
+    // --- MEMORY CLEANUP ---
+    async cleanup() {
+        // Clear crypto cache
+        cryptoCache.clear();
+        
+        // Clear timeouts
+        if (this.state.saveTimeout) {
+            clearTimeout(this.state.saveTimeout);
+        }
+        
+        // Clear inactivity timers
+        clearTimeout(this.inactivityManager.inactivityTimer);
+        clearTimeout(this.inactivityManager.warningTimer);
+        clearInterval(this.inactivityManager.warningCountdown);
+        
+        // Clear database reference
+        if (this.state.db) {
+            this.state.db.close();
+            this.state.db = null;
+        }
+    },
+
     lock() {
         if (confirm("Lock session? You will need to re-enter your key to view notes.")) {
+            // Cleanup resources
+            this.cleanup();
+            
             // Note: Setting to null in JavaScript doesn't guarantee immediate memory clearing
             // Browser garbage collection may keep values in memory temporarily
             this.state.key = null;
             this.state.currentHandle = null;
-            this.state.db = null;
             location.reload(); 
         }
     },
@@ -310,13 +446,20 @@ const App = {
     // --- CRYPTO ENGINE ---
     async getCryptoKey(salt, iterations) {
         const enc = new TextEncoder();
-        const baseKey = await crypto.subtle.importKey("raw", enc.encode(this.state.key), "PBKDF2", false, ["deriveKey"]);
-        // Note: Fallback to hardcoded salt is intentional for backwards compatibility with existing files
-        // New files use random per-device salts for enhanced security
-        return crypto.subtle.deriveKey(
-            { name: "PBKDF2", salt: salt || enc.encode("LocalNote-Permanent-Salt-2026"), iterations: iterations || APP_CONFIG.PBKDF2_ITERATIONS, hash: "SHA-256" },
-            baseKey, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]
-        );
+        
+        // Create cache key from salt and iterations
+        const saltBytes = salt || enc.encode("LocalNote-Permanent-Salt-2026");
+        const cacheKey = `${new Uint8Array(saltBytes).join(',')}_${iterations || APP_CONFIG.PBKDF2_ITERATIONS}`;
+        
+        return await cryptoCache.get(cacheKey, async () => {
+            const baseKey = await crypto.subtle.importKey("raw", enc.encode(this.state.key), "PBKDF2", false, ["deriveKey"]);
+            // Note: Fallback to hardcoded salt is intentional for backwards compatibility with existing files
+            // New files use random per-device salts for enhanced security
+            return crypto.subtle.deriveKey(
+                { name: "PBKDF2", salt: saltBytes, iterations: iterations || APP_CONFIG.PBKDF2_ITERATIONS, hash: "SHA-256" },
+                baseKey, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]
+            );
+        });
     },
 
     async encrypt(text) {
@@ -483,27 +626,41 @@ const App = {
     },
 
     renderList() {
+        PERF.mark('renderList-start');
+        
         const list = document.getElementById('file-list');
         const filter = document.getElementById('search').value.toLowerCase();
-        list.innerHTML = '';
         
         this.state.db.transaction('handles').objectStore('handles').getAll().onsuccess = (e) => {
             const results = e.target.result || [];
-            if (!results.length) return; // nothing to render
+            
+            // Use DocumentFragment for batch DOM updates (single reflow)
+            const fragment = document.createDocumentFragment();
+            
+            if (results.length) {
+                const sorted = results.sort((a,b) => a.name.localeCompare(b.name));
+                sorted.forEach(h => {
+                    if (filter && !h.name.toLowerCase().includes(filter)) return;
 
-            const sorted = results.sort((a,b) => a.name.localeCompare(b.name));
-            sorted.forEach(h => {
-                if (filter && !h.name.toLowerCase().includes(filter)) return;
-
-                const item = document.createElement('div');
-                item.className = `file-item ${this.state.currentHandle?.name === h.name ? 'active' : ''}`;
-                item.onclick = () => this.loadFile(h);
-                item.innerHTML = `
-                    <span style="overflow:hidden; text-overflow:ellipsis;">${h.name}</span>
-                    <span class="remove-btn" onclick="App.removeHandle(event, '${h.name}')">✕</span>
-                `;
-                list.appendChild(item);
-            });
+                    const item = document.createElement('div');
+                    item.className = `file-item ${this.state.currentHandle?.name === h.name ? 'active' : ''}`;
+                    item.setAttribute('data-filename', h.name);
+                    item.setAttribute('tabindex', '0');
+                    item.setAttribute('role', 'button');
+                    item.innerHTML = `
+                        <span style="overflow:hidden; text-overflow:ellipsis;">${h.name}</span>
+                        <span class="remove-btn" aria-label="Remove ${h.name}">✕</span>
+                    `;
+                    fragment.appendChild(item);
+                });
+            }
+            
+            // Single reflow: replace entire list at once
+            list.innerHTML = '';
+            list.appendChild(fragment);
+            
+            PERF.mark('renderList-end');
+            PERF.measure('renderList', 'renderList-start', 'renderList-end');
         };
     }
 };
