@@ -138,7 +138,7 @@ const APP_CONFIG = {
     POLL_INTERVAL_MS: 4000,
     AUTO_SAVE_DELAY_MS: 1000,
     INACTIVITY_TIMEOUT_MS: 10 * 60 * 1000,
-    DB_NAME: 'SafeTXT_v1',
+    DB_NAME: 'LocalNote_v2026', // preserve original name so existing users keep their file handles
     DB_VERSION: 1
 };
 
@@ -322,6 +322,7 @@ const App = {
     async getCryptoKey(salt, iterations) {
         const enc = new TextEncoder();
         const baseKey = await crypto.subtle.importKey("raw", enc.encode(this.state.key), "PBKDF2", false, ["deriveKey"]);
+        // Legacy salt value must be preserved for backwards compatibility with existing encrypted files
         return crypto.subtle.deriveKey(
             { name: "PBKDF2", salt: salt || enc.encode("LocalNote-Permanent-Salt-2026"), iterations: iterations || APP_CONFIG.PBKDF2_ITERATIONS, hash: "SHA-256" },
             baseKey, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]
