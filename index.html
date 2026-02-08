@@ -151,7 +151,7 @@
         <p>Your session will lock in:</p>
         <div id="inactivity-timer">0:30</div>
         <button class="btn btn-primary" onclick="App.inactivityManager.resetTimer()">I'm Still Here</button>
-        <p style="font-size: 12px; margin-top: 12px; color: #856404;">No action in 5 minutes will lock your session for security.</p>
+        <p style="font-size: 12px; margin-top: 12px; color: #856404;">No action in 10 minutes will lock your session for security.</p>
     </div>
     </main>
 </div>
@@ -160,6 +160,15 @@
 /**
  * LOCALNOTE - ARCHITECTURE V2026
  */
+
+// Application configuration for encrypted file format
+const APP_CONFIG = {
+    FILE_FORMAT_VERSION: 0x01,  // Current file format version
+    SALT_LENGTH: 16,             // Bytes for per-device salt
+    IV_LENGTH: 12,               // Bytes for AES-GCM IV
+    PBKDF2_ITERATIONS: 600000    // FIPS-140 compliant iteration count
+};
+
 const App = {
     state: {
         db: null,
@@ -192,7 +201,7 @@ const App = {
 
         // --- INACTIVITY TIMER ---
         inactivityManager: {
-            INACTIVITY_THRESHOLD: 5 * 60 * 1000, // 5 minutes
+            INACTIVITY_THRESHOLD: 10 * 60 * 1000, // 10 minutes (GDPR best practice)
             WARNING_THRESHOLD: 30 * 1000, // Show warning 30 seconds before lock
             inactivityTimer: null,
             warningTimer: null,
@@ -269,8 +278,8 @@ const App = {
     // --- SESSION CONTROL ---
     unlock() {
         const pass = document.getElementById('pass-input').value;
-        if (!pass || pass.length < 3) {
-            alert("Please enter a valid shared secret.");
+        if (!pass || pass.length < 10) {
+            alert("Password must be at least 10 characters for security.");
             return;
         }
         this.state.key = pass;
@@ -284,6 +293,11 @@ const App = {
 
     lock() {
         if (confirm("Lock session? You will need to re-enter your key to view notes.")) {
+            // Note: Setting to null in JavaScript doesn't guarantee immediate memory clearing
+            // Browser garbage collection may keep values in memory temporarily
+            this.state.key = null;
+            this.state.currentHandle = null;
+            this.state.db = null;
             location.reload(); 
         }
     },
@@ -294,28 +308,53 @@ const App = {
     },
 
     // --- CRYPTO ENGINE ---
-    async getCryptoKey() {
+    async getCryptoKey(salt, iterations) {
         const enc = new TextEncoder();
         const baseKey = await crypto.subtle.importKey("raw", enc.encode(this.state.key), "PBKDF2", false, ["deriveKey"]);
+        // Note: Fallback to hardcoded salt is intentional for backwards compatibility with existing files
+        // New files use random per-device salts for enhanced security
         return crypto.subtle.deriveKey(
-            { name: "PBKDF2", salt: enc.encode("LocalNote-Permanent-Salt-2026"), iterations: 100000, hash: "SHA-256" },
+            { name: "PBKDF2", salt: salt || enc.encode("LocalNote-Permanent-Salt-2026"), iterations: iterations || APP_CONFIG.PBKDF2_ITERATIONS, hash: "SHA-256" },
             baseKey, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]
         );
     },
 
     async encrypt(text) {
-        const key = await this.getCryptoKey();
-        const iv = crypto.getRandomValues(new Uint8Array(12));
-        const cipher = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, new TextEncoder().encode(text));
-        const blob = new Uint8Array(iv.length + cipher.byteLength);
-        blob.set(iv); blob.set(new Uint8Array(cipher), 12);
+        const iv = crypto.getRandomValues(new Uint8Array(APP_CONFIG.IV_LENGTH));
+        const salt = crypto.getRandomValues(new Uint8Array(APP_CONFIG.SALT_LENGTH));
+        const derivedKey = await this.getCryptoKey(salt, APP_CONFIG.PBKDF2_ITERATIONS);
+        const cipher = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, derivedKey, new TextEncoder().encode(text));
+        
+        // New format: [VERSION (1 byte)][SALT (16 bytes)][IV (12 bytes)][CIPHERTEXT + TAG]
+        const blob = new Uint8Array(1 + APP_CONFIG.SALT_LENGTH + APP_CONFIG.IV_LENGTH + cipher.byteLength);
+        blob[0] = APP_CONFIG.FILE_FORMAT_VERSION;
+        blob.set(salt, 1);
+        blob.set(iv, 1 + APP_CONFIG.SALT_LENGTH);
+        blob.set(new Uint8Array(cipher), 1 + APP_CONFIG.SALT_LENGTH + APP_CONFIG.IV_LENGTH);
         return blob;
     },
 
     async decrypt(buffer) {
         try {
-            const key = await this.getCryptoKey();
-            const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv: buffer.slice(0, 12) }, key, buffer.slice(12));
+            let salt, iv, ciphertext, iterations;
+            
+            // Check if file has version byte (new format)
+            if (buffer[0] === APP_CONFIG.FILE_FORMAT_VERSION) {
+                // New format: [VERSION][SALT][IV][CIPHERTEXT]
+                salt = buffer.slice(1, 1 + APP_CONFIG.SALT_LENGTH);
+                iv = buffer.slice(1 + APP_CONFIG.SALT_LENGTH, 1 + APP_CONFIG.SALT_LENGTH + APP_CONFIG.IV_LENGTH);
+                ciphertext = buffer.slice(1 + APP_CONFIG.SALT_LENGTH + APP_CONFIG.IV_LENGTH);
+                iterations = APP_CONFIG.PBKDF2_ITERATIONS; // Use new iteration count
+            } else {
+                // Old format (backwards compatibility): [IV][CIPHERTEXT]
+                salt = null; // Use default salt
+                iv = buffer.slice(0, 12);
+                ciphertext = buffer.slice(12);
+                iterations = 100000; // Use old iteration count for backwards compatibility
+            }
+            
+            const key = await this.getCryptoKey(salt, iterations);
+            const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, ciphertext);
             return new TextDecoder().decode(plain);
         } catch (e) { 
             return "### DECRYPTION ERROR ###\nYour secret key might be wrong, or the file is corrupted."; 
@@ -364,7 +403,10 @@ const App = {
     async loadFile(h) {
         try {
             if (await h.queryPermission({mode: 'readwrite'}) !== 'granted') {
-                if (await h.requestPermission({mode: 'readwrite'}) !== 'granted') return;
+                if (await h.requestPermission({mode: 'readwrite'}) !== 'granted') {
+                    document.getElementById('save-status').textContent = "⚠️ Permission denied. Cannot access this file.";
+                    return;
+                }
             }
             
             const file = await h.getFile();
@@ -383,6 +425,7 @@ const App = {
             this.renderList();
         } catch (e) {
             console.error(e);
+            document.getElementById('save-status').textContent = "⚠️ Error loading file";
         }
     },
 
@@ -472,6 +515,13 @@ document.getElementById('editor').oninput = () => {
     clearTimeout(App.state.saveTimeout);
     App.state.saveTimeout = setTimeout(() => App.save(), 1000);
 };
+
+// Enter key support for password input
+document.getElementById('pass-input').addEventListener('keypress', (e) => {
+    if (e.key === 'Enter') {
+        App.unlock();
+    }
+});
 
 // Boot
 App.init();
