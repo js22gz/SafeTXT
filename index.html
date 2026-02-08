@@ -146,23 +146,9 @@ const APP_CONFIG = {
 };
 
 const App = {
-const APP_CONFIG = {
-    VERSION: '1.0-CLEAN', 
-    FILE_FORMAT_VERSION: 0x02, // New format ID to reject any old files
-    SALT_LENGTH: 16,
-    IV_LENGTH: 12,
-    PBKDF2_ITERATIONS: 600000,
-    POLL_INTERVAL_MS: 4000,
-    AUTO_SAVE_DELAY_MS: 1000,
-    INACTIVITY_TIMEOUT_MS: 10 * 60 * 1000,
-    DB_NAME: 'SafeTXT_Secure_v1', // NEW NAMESPACE: Ignores all old local data
-    DB_VERSION: 1
-};
-
-const App = {
     state: {
         db: null,
-        keyBuffer: null, 
+        key: null,
         currentHandle: null,
         lastMTime: 0,
         isDirty: false,
@@ -186,106 +172,204 @@ const App = {
             this.setupSearchInput();
             await this.renderList();
             this.setupPolling();
+            this.setupServiceWorker();
         } catch (e) {
-            console.error('Secure Init Failed:', e);
+            console.error('Init failed:', e);
+            this.state.db = null;
         }
     },
 
-    // --- SESSION CONTROL: MEMORY SHREDDING ---
+    setupPolling() {
+        setInterval(() => this.pollDisk(), APP_CONFIG.POLL_INTERVAL_MS);
+    },
+
+    setupServiceWorker() {
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('./sw.js').catch(() => {});
+        }
+    },
+
+    setupFileListHandlers() {
+        const fileList = document.getElementById('file-list');
+
+        fileList.addEventListener('click', (e) => {
+            const removeBtn = e.target.closest('.remove-btn');
+            if (removeBtn) {
+                const name = removeBtn.closest('.file-item').getAttribute('data-filename');
+                this.removeHandle(e, name);
+                return;
+            }
+            const item = e.target.closest('.file-item');
+            if (item && this.state.db) {
+                const tx = this.state.db.transaction('handles');
+                const req = tx.objectStore('handles').get(item.getAttribute('data-filename'));
+                req.onsuccess = () => { if (req.result) this.loadFile(req.result); };
+            }
+        });
+
+        fileList.addEventListener('keydown', (e) => {
+            const item = e.target.closest('.file-item');
+            if (!item || !this.state.db) return;
+
+            if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                const tx = this.state.db.transaction('handles');
+                const req = tx.objectStore('handles').get(item.getAttribute('data-filename'));
+                req.onsuccess = () => { if (req.result) this.loadFile(req.result); };
+            } else if (e.key === 'Delete' || e.key === 'Backspace') {
+                e.preventDefault();
+                this.removeHandle(e, item.getAttribute('data-filename'));
+            }
+        });
+    },
+
+    setupSearchInput() {
+        document.getElementById('search').addEventListener('input', () => {
+            clearTimeout(this.state.searchTimeout);
+            this.state.searchTimeout = setTimeout(() => this.renderList(), 300);
+        });
+    },
+
+    // --- INACTIVITY TIMER ---
+    inactivityManager: {
+        INACTIVITY_THRESHOLD: APP_CONFIG.INACTIVITY_TIMEOUT_MS,
+        WARNING_SECONDS: 30,
+        inactivityTimer: null,
+        warningTimer: null,
+        warningCountdown: null,
+
+        init() {
+            ['mousedown', 'mousemove', 'keypress', 'scroll', 'touchstart', 'click'].forEach(evt => {
+                document.addEventListener(evt, () => this.resetTimer(), true);
+            });
+            this.resetTimer();
+        },
+
+        resetTimer() {
+            clearTimeout(this.inactivityTimer);
+            clearTimeout(this.warningTimer);
+            clearInterval(this.warningCountdown);
+            this.hideWarning();
+
+            this.inactivityTimer = setTimeout(() => this.showWarning(),
+                this.INACTIVITY_THRESHOLD - this.WARNING_SECONDS * 1000);
+            this.warningTimer = setTimeout(() => this.lockSession(),
+                this.INACTIVITY_THRESHOLD);
+        },
+
+        showWarning() {
+            const el = document.getElementById('inactivity-warning');
+            el.classList.remove('hidden');
+            let seconds = this.WARNING_SECONDS;
+            this.warningCountdown = setInterval(() => {
+                seconds--;
+                const m = Math.floor(seconds / 60);
+                const s = seconds % 60;
+                document.getElementById('inactivity-timer').textContent = `${m}:${s.toString().padStart(2, '0')}`;
+                if (seconds <= 0) clearInterval(this.warningCountdown);
+            }, 1000);
+        },
+
+        hideWarning() {
+            document.getElementById('inactivity-warning').classList.add('hidden');
+            clearInterval(this.warningCountdown);
+        },
+
+        lockSession() {
+            this.hideWarning();
+            App.lock(true);
+        },
+
+        cleanup() {
+            clearTimeout(this.inactivityTimer);
+            clearTimeout(this.warningTimer);
+            clearInterval(this.warningCountdown);
+            this.hideWarning();
+        }
+    },
+
+    // --- SESSION CONTROL ---
     unlock() {
         const inputEl = document.getElementById('pass-input');
         const pass = inputEl.value;
-
         if (!pass || pass.length < 12) {
-            alert("Security Standard: Password must be at least 12 characters.");
+            alert("Password must be at least 12 characters for security.");
             return;
         }
-
-        // Convert string to TypedArray then overwrite the source string immediately
-        this.state.keyBuffer = new TextEncoder().encode(pass);
-        inputEl.value = ""; 
-
+        this.state.key = pass;
+        inputEl.value = "";
         document.getElementById('unlock-overlay').classList.add('hidden');
         document.getElementById('app-shell').classList.remove('blur');
         document.getElementById('editor').disabled = false;
-        document.getElementById('save-status').textContent = "Session: High-Security Active";
+        document.getElementById('save-status').textContent = "Session Active";
         this.inactivityManager.init();
     },
 
     async lock(force = false) {
-        if (!force && !confirm("Wipe session memory and lock?")) return;
-        
-        // PHYSICAL WIPE: Overwrite key memory with zeros
-        if (this.state.keyBuffer) {
-            this.state.keyBuffer.fill(0);
-            this.state.keyBuffer = null;
-        }
-
-        if (this.state.db) { this.state.db.close(); }
-        location.reload(); 
+        if (!force && !confirm("Lock session? You will need to re-enter your key to view notes.")) return;
+        clearTimeout(this.state.saveTimeout);
+        clearTimeout(this.state.searchTimeout);
+        this.inactivityManager.cleanup();
+        if (this.state.db) { this.state.db.close(); this.state.db = null; }
+        this.state.key = null;
+        this.state.currentHandle = null;
+        location.reload();
     },
 
-    // --- CRYPTO ENGINE: NO FALLBACKS ---
-    async getCryptoKey(salt) {
-        if (!this.state.keyBuffer) throw new Error("Key Wiped");
+    togglePass() {
+        const el = document.getElementById('pass-input');
+        el.type = el.type === 'password' ? 'text' : 'password';
+    },
 
-        const baseKey = await crypto.subtle.importKey(
-            "raw", 
-            this.state.keyBuffer, 
-            "PBKDF2", 
-            false, 
-            ["deriveKey"]
-        );
-
+    // --- CRYPTO ENGINE ---
+    async getCryptoKey(salt, iterations) {
+        const enc = new TextEncoder();
+        const baseKey = await crypto.subtle.importKey("raw", enc.encode(this.state.key), "PBKDF2", false, ["deriveKey"]);
+        // Legacy salt value must be preserved for backwards compatibility with existing encrypted files
         return crypto.subtle.deriveKey(
-            { 
-                name: "PBKDF2", 
-                salt: salt, // SALT IS MANDATORY
-                iterations: APP_CONFIG.PBKDF2_ITERATIONS, 
-                hash: "SHA-256" 
-            },
-            baseKey, 
-            { name: "AES-GCM", length: 256 }, 
-            false, 
-            ["encrypt", "decrypt"]
+            { name: "PBKDF2", salt: salt || enc.encode("LocalNote-Permanent-Salt-2026"), iterations: iterations || APP_CONFIG.PBKDF2_ITERATIONS, hash: "SHA-256" },
+            baseKey, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]
         );
     },
 
     async encrypt(text) {
-        const salt = crypto.getRandomValues(new Uint8Array(APP_CONFIG.SALT_LENGTH));
         const iv = crypto.getRandomValues(new Uint8Array(APP_CONFIG.IV_LENGTH));
-        
-        const key = await this.getCryptoKey(salt);
-        const cipher = await crypto.subtle.encrypt(
-            { name: "AES-GCM", iv }, 
-            key, 
-            new TextEncoder().encode(text)
-        );
+        const salt = crypto.getRandomValues(new Uint8Array(APP_CONFIG.SALT_LENGTH));
+        const key = await this.getCryptoKey(salt, APP_CONFIG.PBKDF2_ITERATIONS);
+        const cipher = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, new TextEncoder().encode(text));
 
-        const blob = new Uint8Array(1 + salt.length + iv.length + cipher.byteLength);
+        const blob = new Uint8Array(1 + APP_CONFIG.SALT_LENGTH + APP_CONFIG.IV_LENGTH + cipher.byteLength);
         blob[0] = APP_CONFIG.FILE_FORMAT_VERSION;
         blob.set(salt, 1);
-        blob.set(iv, 1 + salt.length);
-        blob.set(new Uint8Array(cipher), 1 + salt.length + iv.length);
+        blob.set(iv, 1 + APP_CONFIG.SALT_LENGTH);
+        blob.set(new Uint8Array(cipher), 1 + APP_CONFIG.SALT_LENGTH + APP_CONFIG.IV_LENGTH);
         return blob;
     },
 
     async decrypt(buffer) {
         try {
-            // Reject any file that doesn't match our new format version exactly
-            if (buffer[0] !== APP_CONFIG.FILE_FORMAT_VERSION) {
-                throw new Error("Incompatible or Legacy File Format");
+            if (!buffer || buffer.length < 29) throw new Error('File too small or corrupted');
+
+            let salt, iv, ciphertext, iterations;
+
+            if (buffer[0] === APP_CONFIG.FILE_FORMAT_VERSION) {
+                salt = buffer.slice(1, 1 + APP_CONFIG.SALT_LENGTH);
+                iv = buffer.slice(1 + APP_CONFIG.SALT_LENGTH, 1 + APP_CONFIG.SALT_LENGTH + APP_CONFIG.IV_LENGTH);
+                ciphertext = buffer.slice(1 + APP_CONFIG.SALT_LENGTH + APP_CONFIG.IV_LENGTH);
+                iterations = APP_CONFIG.PBKDF2_ITERATIONS;
+            } else {
+                salt = null;
+                iv = buffer.slice(0, 12);
+                ciphertext = buffer.slice(12);
+                iterations = 100000;
             }
 
-            const salt = buffer.slice(1, 1 + APP_CONFIG.SALT_LENGTH);
-            const iv = buffer.slice(1 + APP_CONFIG.SALT_LENGTH, 1 + APP_CONFIG.SALT_LENGTH + APP_CONFIG.IV_LENGTH);
-            const ciphertext = buffer.slice(1 + APP_CONFIG.SALT_LENGTH + APP_CONFIG.IV_LENGTH);
-
-            const key = await this.getCryptoKey(salt);
+            const key = await this.getCryptoKey(salt, iterations);
             const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, ciphertext);
             return new TextDecoder().decode(plain);
         } catch (e) {
-            return `### ACCESS DENIED ###\n${e.message === 'Incompatible or Legacy File Format' ? e.message : 'Incorrect Secret Key.'}`;
+            if (e.name === 'OperationError') return "### DECRYPTION ERROR ###\nIncorrect password or corrupted file.";
+            return `### DECRYPTION ERROR ###\n${e.message}`;
         }
     },
 
@@ -293,47 +377,99 @@ const App = {
     async createNote() {
         try {
             const h = await window.showSaveFilePicker({
-                suggestedName: 'secure_note.txt',
+                suggestedName: 'untitled.txt',
                 types: [{ accept: {'text/plain': ['.txt']} }]
             });
-            const blob = await this.encrypt('');
-            const stream = await h.createWritable();
-            await stream.write(blob);
-            await stream.close();
+
+            if (this.state.key) {
+                const blob = await this.encrypt('');
+                const stream = await h.createWritable();
+                await stream.write(blob);
+                await stream.close();
+            }
+
             await this.persistHandle(h);
             await this.loadFile(h);
-        } catch (e) { console.error("Create Cancelled"); }
+            document.getElementById('save-status').textContent = "✓ New note created";
+        } catch (e) {
+            if (e.name !== 'AbortError') {
+                document.getElementById('save-status').textContent = "⚠️ Failed to create note";
+            }
+        }
+    },
+
+    async importNote() {
+        try {
+            const [h] = await window.showOpenFilePicker();
+            await this.persistHandle(h);
+            await this.loadFile(h);
+            document.getElementById('save-status').textContent = "✓ File imported";
+        } catch (e) {
+            if (e.name !== 'AbortError') {
+                document.getElementById('save-status').textContent = "⚠️ Failed to import file";
+            }
+        }
+    },
+
+    async persistHandle(h) {
+        const tx = this.state.db.transaction('handles', 'readwrite');
+        await tx.objectStore('handles').put(h, h.name);
+        await this.renderList();
+    },
+
+    async getHandlesFromDB() {
+        if (!this.state.db) return [];
+        return new Promise((resolve, reject) => {
+            const req = this.state.db.transaction('handles', 'readonly').objectStore('handles').getAll();
+            req.onsuccess = () => resolve(req.result || []);
+            req.onerror = () => reject(req.error);
+        });
     },
 
     async loadFile(h) {
         try {
+            if (await h.queryPermission({mode: 'readwrite'}) !== 'granted') {
+                if (await h.requestPermission({mode: 'readwrite'}) !== 'granted') {
+                    document.getElementById('save-status').textContent = "⚠️ Permission denied";
+                    return;
+                }
+            }
+
             const file = await h.getFile();
             const buffer = await file.arrayBuffer();
+
             this.state.currentHandle = h;
             this.state.lastMTime = file.lastModified;
             this.state.isDirty = false;
 
-            document.getElementById('editor').value = await this.decrypt(new Uint8Array(buffer));
+            document.getElementById('editor').value = buffer.byteLength > 0 ? await this.decrypt(new Uint8Array(buffer)) : "";
             document.getElementById('active-filename').textContent = h.name;
-            document.getElementById('save-status').textContent = "Encrypted Session Loaded";
+            document.getElementById('conflict-bar').style.display = 'none';
+            document.getElementById('save-status').textContent = "Loaded from disk";
             await this.renderList();
-        } catch (e) { document.getElementById('save-status').textContent = "⚠️ Read Failure"; }
+        } catch (e) {
+            document.getElementById('save-status').textContent = "⚠️ Error loading file";
+        }
     },
 
     async save() {
-        if (!this.state.currentHandle || !this.state.keyBuffer) return;
+        if (!this.state.currentHandle || !this.state.key) return;
+
         try {
             const blob = await this.encrypt(document.getElementById('editor').value);
             const stream = await this.state.currentHandle.createWritable();
             await stream.write(blob);
             await stream.close();
+
             const f = await this.state.currentHandle.getFile();
             this.state.lastMTime = f.lastModified;
             this.state.isDirty = false;
-            document.getElementById('save-status').textContent = "✓ Verified & Saved";
-        } catch (e) { document.getElementById('save-status').textContent = "⚠️ Write Error"; }
-    }
-    
+            document.getElementById('save-status').textContent = "✓ Encrypted & Saved";
+        } catch (e) {
+            document.getElementById('save-status').textContent = "⚠️ Error Saving";
+        }
+    },
+
     // --- SYNC & CONFLICTS ---
     async pollDisk() {
         if (!this.state.currentHandle || !this.state.key) return;
