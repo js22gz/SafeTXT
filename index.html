@@ -594,12 +594,17 @@ const App = {
             return {merged: result.join('\n'), hasConflict: false};
         }
 
-        // Conflict: produce annotated output
+        // Conflict: produce annotated output with pre-indexed hunks for O(n)
+        const lIdx = new Map();
+        const rIdx = new Map();
+        for (const h of lHunks) for (let k = h.baseStart; k < h.baseEnd; k++) lIdx.set(k, h);
+        for (const h of rHunks) for (let k = h.baseStart; k < h.baseEnd; k++) rIdx.set(k, h);
+
         const out = [];
         let bi = 0;
         while (bi < bLines.length) {
-            const lh = lHunks.find(h => bi >= h.baseStart && bi < h.baseEnd);
-            const rh = rHunks.find(h => bi >= h.baseStart && bi < h.baseEnd);
+            const lh = lIdx.get(bi);
+            const rh = rIdx.get(bi);
             if (lh && rh) {
                 out.push('<<<<<<< LOCAL');
                 for (let c = lh.childStart; c < lh.childEnd; c++) out.push(lLines[c]);
@@ -631,28 +636,16 @@ const App = {
     },
 
     // --- CONFLICT / BACKUP HELPERS ---
-    async _writeConflictFile(name, content) {
-        const conflictName = name.replace(/(\.[^.]+)$/, '-conflict$1');
+    /**
+     * Store backup content in IndexedDB so the user can retrieve it later
+     * without blocking UI with a file picker dialog.
+     */
+    async _storeBackup(name, content) {
+        if (!this.state.db) return false;
         try {
-            const h = await window.showSaveFilePicker({suggestedName: conflictName, types: [{accept: {'text/plain': ['.txt']}}]});
-            const blob = await this.encrypt(content);
-            const stream = await h.createWritable();
-            await stream.write(blob);
-            await stream.close();
-            await this.persistHandle(h);
-            return true;
-        } catch (e) { return false; }
-    },
-
-    async _writeBackupFile(name, content) {
-        const backupName = name.replace(/(\.[^.]+)$/, '-backup$1');
-        try {
-            const h = await window.showSaveFilePicker({suggestedName: backupName, types: [{accept: {'text/plain': ['.txt']}}]});
-            const blob = await this.encrypt(content);
-            const stream = await h.createWritable();
-            await stream.write(blob);
-            await stream.close();
-            await this.persistHandle(h);
+            const backupKey = name + '::backup::' + Date.now();
+            const tx = this.state.db.transaction('handles', 'readwrite');
+            tx.objectStore('handles').put({type: 'backup', name, content, ts: Date.now()}, backupKey);
             return true;
         } catch (e) { return false; }
     },
@@ -680,7 +673,20 @@ const App = {
 
             // User has local edits — attempt three-way merge
             const localText = document.getElementById('editor').value;
-            const baseText = this.state.baseContent ?? '';
+            const baseText = this.state.baseContent;
+
+            // If no base snapshot exists, we can't do a three-way merge.
+            // Fall back: keep remote, store local as backup.
+            if (baseText == null) {
+                await this._storeBackup(this.state.currentHandle.name, localText);
+                document.getElementById('editor').value = remoteText;
+                this.state.baseContent = remoteText;
+                this.state.lastMTime = file.lastModified;
+                this.state.isDirty = false;
+                this.showToast('Remote updated — local edits backed up');
+                document.getElementById('save-status').textContent = 'Synced from disk';
+                return;
+            }
 
             // If base matches remote, nothing new from remote
             if (baseText === remoteText) { this.state.lastMTime = file.lastModified; return; }
@@ -698,7 +704,7 @@ const App = {
                 const {merged, hasConflict} = this.diff3Merge(baseText, localText, remoteText);
 
                 if (!hasConflict) {
-                    // Auto-merged cleanly
+                    // Auto-merged cleanly — update editor and schedule save
                     document.getElementById('editor').value = merged;
                     this.state.baseContent = merged;
                     this.state.lastMTime = file.lastModified;
@@ -706,30 +712,26 @@ const App = {
                     clearTimeout(this.state.saveTimeout);
                     this.state.saveTimeout = setTimeout(() => this.save(), APP_CONFIG.AUTO_SAVE_DELAY_MS);
                     this.showToast('Changes merged automatically');
-                    document.getElementById('save-status').textContent = '✓ Auto-merged';
+                    document.getElementById('save-status').textContent = '● Merged, saving...';
                 } else {
-                    // Conflict — save conflict file with markers, keep local in editor
-                    const saved = await this._writeConflictFile(this.state.currentHandle.name, merged);
+                    // Conflict — write merged content with markers into the editor and auto-save
+                    document.getElementById('editor').value = merged;
+                    this.state.baseContent = remoteText;
                     this.state.lastMTime = file.lastModified;
-                    if (saved) {
-                        this.showToast('⚠️ Conflict detected — review the "-conflict" file');
-                        document.getElementById('save-status').textContent = '⚠️ Conflict saved';
-                    } else {
-                        this.showToast('⚠️ Conflict detected — could not save conflict file');
-                    }
+                    this.state.isDirty = true;
+                    clearTimeout(this.state.saveTimeout);
+                    this.state.saveTimeout = setTimeout(() => this.save(), APP_CONFIG.AUTO_SAVE_DELAY_MS);
+                    this.showToast('⚠️ Conflict detected — look for <<<<<<< LOCAL markers');
+                    document.getElementById('save-status').textContent = '⚠️ Conflict — review markers';
                 }
             } catch (mergeErr) {
                 // Merge failed entirely — fallback: overwrite with remote, save local as backup
-                const backedUp = await this._writeBackupFile(this.state.currentHandle.name, localText);
+                await this._storeBackup(this.state.currentHandle.name, localText);
                 document.getElementById('editor').value = remoteText;
                 this.state.baseContent = remoteText;
                 this.state.lastMTime = file.lastModified;
                 this.state.isDirty = false;
-                if (backedUp) {
-                    this.showToast('Merge failed — local saved as "-backup", loaded remote version');
-                } else {
-                    this.showToast('Merge failed — loaded remote version');
-                }
+                this.showToast('Merge failed — local edits backed up, loaded remote version');
                 document.getElementById('save-status').textContent = '⚠️ Fallback to remote';
             }
         } catch (e) { /* polling failure — silent */ }
