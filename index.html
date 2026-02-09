@@ -501,14 +501,14 @@ const App = {
 
         try {
             const blob = await this.encrypt(document.getElementById('editor').value);
+            const digest = await this.computeDigest(blob);
             const stream = await this.state.currentHandle.createWritable();
             await stream.write(blob);
             await stream.close();
 
             const f = await this.state.currentHandle.getFile();
             this.state.lastMTime = f.lastModified;
-            const savedBuffer = await f.arrayBuffer();
-            this.state.lastDigest = await this.computeDigest(savedBuffer);
+            this.state.lastDigest = digest;
             this.state.lastDigestCheck = Date.now();
             this.state.isDirty = false;
             this.state.baseContent = document.getElementById('editor').value;
@@ -673,13 +673,13 @@ const App = {
             const now = Date.now();
             const hasDigest = this.state.lastDigest !== null;
             const shouldThrottle = hasDigest && now - this.state.lastDigestCheck < APP_CONFIG.DIGEST_THROTTLE_MS;
-            const shouldSkipPoll = shouldThrottle && !this.state.isDirty;
-            // When editing locally, keep checks frequent to catch concurrent edits.
-            if (shouldSkipPoll) return;
 
             const file = await this.state.currentHandle.getFile();
-            const buffer = await file.arrayBuffer();
+            const mtimeNewer = file.lastModified > this.state.lastMTime;
+            const shouldCheckDigest = this.state.isDirty || mtimeNewer || !shouldThrottle;
+            if (!shouldCheckDigest) return;
             // Digest comparison catches shared-drive updates even when mtime stays the same.
+            const buffer = await file.arrayBuffer();
             const digest = await this.computeDigest(buffer);
             if (digest === this.state.lastDigest) {
                 this.state.lastMTime = file.lastModified;
