@@ -503,7 +503,8 @@ const App = {
 
             const f = await this.state.currentHandle.getFile();
             this.state.lastMTime = f.lastModified;
-            this.state.lastDigest = await this.digest(blob);
+            const savedBuffer = await f.arrayBuffer();
+            this.state.lastDigest = await this.digest(savedBuffer);
             this.state.isDirty = false;
             this.state.baseContent = document.getElementById('editor').value;
             document.getElementById('save-status').textContent = "✓ Encrypted & Saved";
@@ -667,7 +668,10 @@ const App = {
             const file = await this.state.currentHandle.getFile();
             const buffer = await file.arrayBuffer();
             const digest = await this.digest(buffer);
-            if (digest === this.state.lastDigest) { this.state.lastMTime = file.lastModified; return; }
+            if (digest === this.state.lastDigest) {
+                this.state.lastMTime = file.lastModified;
+                return;
+            }
 
             clearTimeout(this.state.saveTimeout);
             const remoteText = buffer.byteLength > 0 ? await this.decrypt(new Uint8Array(buffer)) : '';
