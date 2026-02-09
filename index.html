@@ -112,7 +112,7 @@
     <aside>
         <button class="btn btn-primary" onclick="App.createNote()">＋ Create New Note</button>
         <button class="btn btn-outline" onclick="App.importNote()">📂 Open Existing File</button>
-        <button class="btn btn-outline" id="save-btn" onclick="App.saveOrSaveAs()">💾 Save As...</button>
+        <button class="btn btn-outline" id="save-btn" onclick="App.saveOrSaveAs()" aria-label="Save as new file">💾 Save As...</button>
         <button class="btn btn-outline" id="refresh-btn" onclick="App.refreshFile()" aria-label="Refresh file from disk">🔄 Refresh File</button>
         
         <div id="file-list"></div>
@@ -564,7 +564,6 @@ const App = {
             return;
         }
 
-        const statusBefore = document.getElementById('save-status').textContent;
         document.getElementById('save-status').textContent = "🔄 Checking for updates...";
         
         // Manually trigger the pollDisk to check for remote changes
