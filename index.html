@@ -215,7 +215,10 @@ const App = {
             const observer = new FileSystemObserver(() => {
                 if (this.state.fileObserver !== observer) return;
                 clearTimeout(this.state.fileObserverTimeout);
-                this.state.fileObserverTimeout = setTimeout(() => this.pollDisk(), APP_CONFIG.OBSERVER_DEBOUNCE_MS);
+                this.state.fileObserverTimeout = setTimeout(() => {
+                    if (this.state.fileObserver !== observer) return;
+                    this.pollDisk();
+                }, APP_CONFIG.OBSERVER_DEBOUNCE_MS);
             });
             this.state.fileObserver = observer;
             await observer.observe(handle);
