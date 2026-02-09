@@ -149,7 +149,7 @@ const APP_CONFIG = {
     IV_LENGTH: 12,
     PBKDF2_ITERATIONS: 600000,
     POLL_INTERVAL_MS: 4000,
-    DIGEST_THROTTLE_MS: 15000,
+    DIGEST_THROTTLE_MS: 15000, // throttle digest hashing to reduce shared-drive I/O
     AUTO_SAVE_DELAY_MS: 1000,
     INACTIVITY_TIMEOUT_MS: 10 * 60 * 1000,
     DB_NAME: 'LocalNote_v2026', // preserve original name so existing users keep their file handles
@@ -676,10 +676,6 @@ const App = {
             if (withinThrottle && !this.state.isDirty) return;
 
             const file = await this.state.currentHandle.getFile();
-            const mtimeChanged = file.lastModified > this.state.lastMTime;
-            if (!mtimeChanged && withinThrottle && !this.state.isDirty) {
-                return;
-            }
             const buffer = await file.arrayBuffer();
             const digest = await this.computeDigest(buffer);
             this.state.lastDigestCheck = now;
