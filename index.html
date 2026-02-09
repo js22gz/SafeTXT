@@ -220,7 +220,7 @@ const App = {
             await observer.observe(handle);
         } catch (e) {
             this.teardownFileObserver();
-            console.warn('FileSystemObserver setup failed:', e);
+            console.warn('FileSystemObserver unavailable; falling back to polling-only sync.', e);
         }
     },
 
