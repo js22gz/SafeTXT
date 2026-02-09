@@ -673,16 +673,18 @@ const App = {
             const now = Date.now();
             const withinThrottle = this.state.lastDigest
                 && now - this.state.lastDigestCheck < APP_CONFIG.DIGEST_THROTTLE_MS;
+            // When editing locally, keep checks frequent to catch concurrent edits.
             if (withinThrottle && !this.state.isDirty) return;
 
             const file = await this.state.currentHandle.getFile();
             const buffer = await file.arrayBuffer();
             const digest = await this.computeDigest(buffer);
-            this.state.lastDigestCheck = now;
             if (digest === this.state.lastDigest) {
                 this.state.lastMTime = file.lastModified;
+                this.state.lastDigestCheck = now;
                 return;
             }
+            this.state.lastDigestCheck = now;
 
             clearTimeout(this.state.saveTimeout);
             const remoteText = buffer.byteLength > 0 ? await this.decrypt(new Uint8Array(buffer)) : '';
