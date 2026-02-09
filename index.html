@@ -149,6 +149,7 @@ const APP_CONFIG = {
     IV_LENGTH: 12,
     PBKDF2_ITERATIONS: 600000,
     POLL_INTERVAL_MS: 4000,
+    OBSERVER_DEBOUNCE_MS: 250,
     DIGEST_THROTTLE_MS: 15000, // throttle digest hashing to reduce shared-drive I/O
     AUTO_SAVE_DELAY_MS: 1000,
     INACTIVITY_TIMEOUT_MS: 10 * 60 * 1000,
@@ -161,6 +162,9 @@ const App = {
         db: null,
         key: null,
         currentHandle: null,
+        fileObserver: null,
+        fileObserverTimeout: null,
+        pollInProgress: false,
         lastMTime: 0,
         lastDigest: null,
         lastDigestCheck: 0,
@@ -195,6 +199,35 @@ const App = {
 
     setupPolling() {
         setInterval(() => this.pollDisk(), APP_CONFIG.POLL_INTERVAL_MS);
+    },
+
+    teardownFileObserver() {
+        if (this.state.fileObserver?.disconnect) this.state.fileObserver.disconnect();
+        this.state.fileObserver = null;
+        clearTimeout(this.state.fileObserverTimeout);
+        this.state.fileObserverTimeout = null;
+    },
+
+    async setupFileObserver(handle) {
+        if (!handle || !('FileSystemObserver' in window)) return;
+        try {
+            this.teardownFileObserver();
+            const observer = new FileSystemObserver(() => {
+                if (this.state.fileObserver !== observer) return;
+                if (this.state.pollInProgress) return;
+                clearTimeout(this.state.fileObserverTimeout);
+                this.state.fileObserverTimeout = setTimeout(() => {
+                    if (this.state.fileObserver !== observer) return;
+                    void this.pollDisk();
+                }, APP_CONFIG.OBSERVER_DEBOUNCE_MS);
+            });
+            this.state.fileObserver = observer;
+            await observer.observe(handle);
+        } catch (e) {
+            this.teardownFileObserver();
+            const reason = e?.name || 'unknown';
+            console.warn(`FileSystemObserver setup failed (${reason}); falling back to polling-only sync.`, e);
+        }
     },
 
     setupServiceWorker() {
@@ -335,6 +368,7 @@ const App = {
         document.getElementById('pass-input').value = '';
         this.state.key = null;
         this.state.currentHandle = null;
+        this.teardownFileObserver();
         this.state.isDirty = false;
         this.state.baseContent = null;
         this.state.lastMTime = 0;
@@ -491,6 +525,7 @@ const App = {
             document.getElementById('active-filename').textContent = h.name;
             document.getElementById('save-status').textContent = "Loaded from disk";
             await this.renderList();
+            await this.setupFileObserver(h);
         } catch (e) {
             document.getElementById('save-status').textContent = "⚠️ Error loading file";
         }
@@ -668,7 +703,8 @@ const App = {
 
     // --- SYNC ---
     async pollDisk() {
-        if (!this.state.currentHandle || !this.state.key) return;
+        if (!this.state.currentHandle || !this.state.key || this.state.pollInProgress) return;
+        this.state.pollInProgress = true;
         try {
             const now = Date.now();
             const hasDigest = this.state.lastDigest !== null;
@@ -783,6 +819,7 @@ const App = {
                 document.getElementById('save-status').textContent = '⚠️ Fallback to remote';
             }
         } catch (e) { /* polling failure — silent */ }
+        finally { this.state.pollInProgress = false; }
     },
 
     // --- SIDEBAR UI ---
@@ -794,6 +831,7 @@ const App = {
 
             if (this.state.currentHandle?.name === name) {
                 this.state.currentHandle = null;
+                this.teardownFileObserver();
                 document.getElementById('editor').value = '';
                 document.getElementById('active-filename').textContent = 'No student selected';
             }
