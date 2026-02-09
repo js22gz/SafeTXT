@@ -75,6 +75,16 @@
         #inactivity-warning p { margin: 0 0 12px 0; color: #856404; font-size: 14px; }
         #inactivity-timer { font-size: 32px; font-weight: bold; color: #dc3545; text-align: center; margin: 12px 0; font-family: 'Courier New', monospace; }
         #inactivity-warning .btn { width: 100%; padding: 10px; margin-top: 12px; }
+
+        /* Toast notification */
+        #toast {
+            position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+            background: #323232; color: #fff; padding: 12px 24px; border-radius: 8px;
+            font-size: 14px; z-index: 3000; opacity: 0; transition: opacity 0.4s;
+            pointer-events: none; max-width: 480px; text-align: center;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+        }
+        #toast.show { opacity: 1; pointer-events: auto; }
     </style>
 </head>
 <body>
@@ -129,6 +139,8 @@
     </main>
 </div>
 
+<div id="toast"></div>
+
 <script>
 const APP_CONFIG = {
     VERSION: '1.1',
@@ -150,6 +162,7 @@ const App = {
         currentHandle: null,
         lastMTime: 0,
         isDirty: false,
+        baseContent: null,
         saveTimeout: null,
         searchTimeout: null
     },
@@ -320,6 +333,7 @@ const App = {
         this.state.key = null;
         this.state.currentHandle = null;
         this.state.isDirty = false;
+        this.state.baseContent = null;
         this.state.lastMTime = 0;
 
         if (this.state.db) { this.state.db.close(); this.state.db = null; }
@@ -458,7 +472,9 @@ const App = {
             this.state.lastMTime = file.lastModified;
             this.state.isDirty = false;
 
-            document.getElementById('editor').value = buffer.byteLength > 0 ? await this.decrypt(new Uint8Array(buffer)) : "";
+            const text = buffer.byteLength > 0 ? await this.decrypt(new Uint8Array(buffer)) : "";
+            this.state.baseContent = text;
+            document.getElementById('editor').value = text;
             document.getElementById('active-filename').textContent = h.name;
             document.getElementById('save-status').textContent = "Loaded from disk";
             await this.renderList();
@@ -479,10 +495,159 @@ const App = {
             const f = await this.state.currentHandle.getFile();
             this.state.lastMTime = f.lastModified;
             this.state.isDirty = false;
+            this.state.baseContent = document.getElementById('editor').value;
             document.getElementById('save-status').textContent = "✓ Encrypted & Saved";
         } catch (e) {
             document.getElementById('save-status').textContent = "⚠️ Error Saving";
         }
+    },
+
+    // --- DIFF / MERGE ---
+    /**
+     * Compute longest common subsequence length table for two arrays.
+     */
+    _lcsTable(a, b) {
+        const m = a.length, n = b.length;
+        const dp = Array.from({length: m + 1}, () => new Uint32Array(n + 1));
+        for (let i = 1; i <= m; i++)
+            for (let j = 1; j <= n; j++)
+                dp[i][j] = a[i - 1] === b[j - 1] ? dp[i - 1][j - 1] + 1 : Math.max(dp[i - 1][j], dp[i][j - 1]);
+        return dp;
+    },
+
+    /**
+     * Line-based three-way merge. Returns {merged, hasConflict}.
+     * base/local/remote are strings. Splits on newlines and merges.
+     */
+    diff3Merge(base, local, remote) {
+        const bLines = base.split('\n');
+        const lLines = local.split('\n');
+        const rLines = remote.split('\n');
+
+        // Build diff hunks from base→child using LCS back-trace
+        const diffHunks = (base, child) => {
+            const dp = this._lcsTable(base, child);
+            const hunks = [];
+            let i = base.length, j = child.length;
+            const pairs = [];
+            while (i > 0 && j > 0) {
+                if (base[i - 1] === child[j - 1]) { pairs.push([i - 1, j - 1]); i--; j--; }
+                else if (dp[i - 1][j] >= dp[i][j - 1]) i--;
+                else j--;
+            }
+            pairs.reverse();
+            let bi = 0, ci = 0;
+            for (const [bm, cm] of pairs) {
+                if (bi < bm || ci < cm) hunks.push({baseStart: bi, baseEnd: bm, childStart: ci, childEnd: cm});
+                bi = bm + 1; ci = cm + 1;
+            }
+            if (bi < base.length || ci < child.length) hunks.push({baseStart: bi, baseEnd: base.length, childStart: ci, childEnd: child.length});
+            return hunks;
+        };
+
+        const lHunks = diffHunks(bLines, lLines);
+        const rHunks = diffHunks(bLines, rLines);
+
+        // Build a map of base line ranges changed by each side
+        const touchedByL = new Set();
+        const touchedByR = new Set();
+        for (const h of lHunks) for (let k = h.baseStart; k < h.baseEnd; k++) touchedByL.add(k);
+        for (const h of rHunks) for (let k = h.baseStart; k < h.baseEnd; k++) touchedByR.add(k);
+
+        // Check for overlapping changes (conflicts)
+        let hasConflict = false;
+        for (const line of touchedByL) {
+            if (touchedByR.has(line)) { hasConflict = true; break; }
+        }
+
+        if (!hasConflict) {
+            // Non-conflicting: apply remote hunks to local (local is our working copy)
+            // Rebuild from base, preferring local changes where local changed, remote where remote changed, base otherwise
+            const result = [];
+            let bi = 0;
+            const lMap = new Map(); // baseStart -> hunk
+            const rMap = new Map();
+            for (const h of lHunks) lMap.set(h.baseStart, h);
+            for (const h of rHunks) rMap.set(h.baseStart, h);
+
+            while (bi < bLines.length) {
+                if (lMap.has(bi)) {
+                    const h = lMap.get(bi);
+                    for (let c = h.childStart; c < h.childEnd; c++) result.push(lLines[c]);
+                    bi = h.baseEnd;
+                } else if (rMap.has(bi)) {
+                    const h = rMap.get(bi);
+                    for (let c = h.childStart; c < h.childEnd; c++) result.push(rLines[c]);
+                    bi = h.baseEnd;
+                } else {
+                    result.push(bLines[bi]);
+                    bi++;
+                }
+            }
+            // Append any trailing additions from local or remote
+            for (const h of lHunks) {
+                if (h.baseStart >= bLines.length) for (let c = h.childStart; c < h.childEnd; c++) result.push(lLines[c]);
+            }
+            for (const h of rHunks) {
+                if (h.baseStart >= bLines.length) for (let c = h.childStart; c < h.childEnd; c++) result.push(rLines[c]);
+            }
+            return {merged: result.join('\n'), hasConflict: false};
+        }
+
+        // Conflict: produce annotated output with pre-indexed hunks for O(n)
+        const lIdx = new Map();
+        const rIdx = new Map();
+        for (const h of lHunks) for (let k = h.baseStart; k < h.baseEnd; k++) lIdx.set(k, h);
+        for (const h of rHunks) for (let k = h.baseStart; k < h.baseEnd; k++) rIdx.set(k, h);
+
+        const out = [];
+        let bi = 0;
+        while (bi < bLines.length) {
+            const lh = lIdx.get(bi);
+            const rh = rIdx.get(bi);
+            if (lh && rh) {
+                out.push('<<<<<<< LOCAL');
+                for (let c = lh.childStart; c < lh.childEnd; c++) out.push(lLines[c]);
+                out.push('=======');
+                for (let c = rh.childStart; c < rh.childEnd; c++) out.push(rLines[c]);
+                out.push('>>>>>>> REMOTE');
+                bi = Math.max(lh.baseEnd, rh.baseEnd);
+            } else if (lh) {
+                for (let c = lh.childStart; c < lh.childEnd; c++) out.push(lLines[c]);
+                bi = lh.baseEnd;
+            } else if (rh) {
+                for (let c = rh.childStart; c < rh.childEnd; c++) out.push(rLines[c]);
+                bi = rh.baseEnd;
+            } else {
+                out.push(bLines[bi]);
+                bi++;
+            }
+        }
+        return {merged: out.join('\n'), hasConflict: true};
+    },
+
+    // --- TOAST ---
+    showToast(message, duration = 5000) {
+        const el = document.getElementById('toast');
+        el.textContent = message;
+        el.classList.add('show');
+        clearTimeout(this._toastTimer);
+        this._toastTimer = setTimeout(() => el.classList.remove('show'), duration);
+    },
+
+    // --- CONFLICT / BACKUP HELPERS ---
+    /**
+     * Store backup content in IndexedDB so the user can retrieve it later
+     * without blocking UI with a file picker dialog.
+     */
+    async _storeBackup(name, content) {
+        if (!this.state.db) return false;
+        try {
+            const backupKey = name + '::backup::' + Date.now();
+            const tx = this.state.db.transaction('handles', 'readwrite');
+            tx.objectStore('handles').put({type: 'backup', name, content, ts: Date.now()}, backupKey);
+            return true;
+        } catch (e) { return false; }
     },
 
     // --- SYNC ---
@@ -490,9 +655,84 @@ const App = {
         if (!this.state.currentHandle || !this.state.key) return;
         try {
             const file = await this.state.currentHandle.getFile();
-            if (file.lastModified > this.state.lastMTime) {
-                clearTimeout(this.state.saveTimeout);
-                await this.loadFile(this.state.currentHandle);
+            if (file.lastModified <= this.state.lastMTime) return;
+
+            clearTimeout(this.state.saveTimeout);
+            const buffer = await file.arrayBuffer();
+            const remoteText = buffer.byteLength > 0 ? await this.decrypt(new Uint8Array(buffer)) : '';
+
+            // If user hasn't edited locally, just reload silently
+            if (!this.state.isDirty) {
+                document.getElementById('editor').value = remoteText;
+                this.state.baseContent = remoteText;
+                this.state.lastMTime = file.lastModified;
+                this.state.isDirty = false;
+                document.getElementById('save-status').textContent = 'Synced from disk';
+                return;
+            }
+
+            // User has local edits — attempt three-way merge
+            const localText = document.getElementById('editor').value;
+            const baseText = this.state.baseContent;
+
+            // If no base snapshot exists, we can't do a three-way merge.
+            // Fall back: keep remote, store local as backup.
+            if (baseText == null) {
+                await this._storeBackup(this.state.currentHandle.name, localText);
+                document.getElementById('editor').value = remoteText;
+                this.state.baseContent = remoteText;
+                this.state.lastMTime = file.lastModified;
+                this.state.isDirty = false;
+                this.showToast('Remote updated — local edits backed up');
+                document.getElementById('save-status').textContent = 'Synced from disk';
+                return;
+            }
+
+            // If base matches remote, nothing new from remote
+            if (baseText === remoteText) { this.state.lastMTime = file.lastModified; return; }
+            // If base matches local, local had no real change
+            if (baseText === localText) {
+                document.getElementById('editor').value = remoteText;
+                this.state.baseContent = remoteText;
+                this.state.lastMTime = file.lastModified;
+                this.state.isDirty = false;
+                document.getElementById('save-status').textContent = 'Synced from disk';
+                return;
+            }
+
+            try {
+                const {merged, hasConflict} = this.diff3Merge(baseText, localText, remoteText);
+
+                if (!hasConflict) {
+                    // Auto-merged cleanly — update editor and schedule save
+                    document.getElementById('editor').value = merged;
+                    this.state.baseContent = merged;
+                    this.state.lastMTime = file.lastModified;
+                    this.state.isDirty = true;
+                    clearTimeout(this.state.saveTimeout);
+                    this.state.saveTimeout = setTimeout(() => this.save(), APP_CONFIG.AUTO_SAVE_DELAY_MS);
+                    this.showToast('Changes merged automatically');
+                    document.getElementById('save-status').textContent = '● Merged, saving...';
+                } else {
+                    // Conflict — write merged content with markers into the editor and auto-save
+                    document.getElementById('editor').value = merged;
+                    this.state.baseContent = remoteText;
+                    this.state.lastMTime = file.lastModified;
+                    this.state.isDirty = true;
+                    clearTimeout(this.state.saveTimeout);
+                    this.state.saveTimeout = setTimeout(() => this.save(), APP_CONFIG.AUTO_SAVE_DELAY_MS);
+                    this.showToast('⚠️ Conflict detected — look for <<<<<<< LOCAL markers');
+                    document.getElementById('save-status').textContent = '⚠️ Conflict — review markers';
+                }
+            } catch (mergeErr) {
+                // Merge failed entirely — fallback: overwrite with remote, save local as backup
+                await this._storeBackup(this.state.currentHandle.name, localText);
+                document.getElementById('editor').value = remoteText;
+                this.state.baseContent = remoteText;
+                this.state.lastMTime = file.lastModified;
+                this.state.isDirty = false;
+                this.showToast('Merge failed — local edits backed up, loaded remote version');
+                document.getElementById('save-status').textContent = '⚠️ Fallback to remote';
             }
         } catch (e) { /* polling failure — silent */ }
     },
