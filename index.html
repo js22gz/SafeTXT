@@ -161,6 +161,7 @@ const App = {
         db: null,
         key: null,
         currentHandle: null,
+        fileObserver: null,
         lastMTime: 0,
         lastDigest: null,
         lastDigestCheck: 0,
@@ -195,6 +196,25 @@ const App = {
 
     setupPolling() {
         setInterval(() => this.pollDisk(), APP_CONFIG.POLL_INTERVAL_MS);
+    },
+
+    teardownFileObserver() {
+        if (this.state.fileObserver?.disconnect) this.state.fileObserver.disconnect();
+        this.state.fileObserver = null;
+    },
+
+    async setupFileObserver(handle) {
+        if (!handle || !('FileSystemObserver' in window)) return;
+        try {
+            this.teardownFileObserver();
+            const observer = new FileSystemObserver(() => {
+                this.pollDisk();
+            });
+            this.state.fileObserver = observer;
+            await observer.observe(handle);
+        } catch (e) {
+            this.state.fileObserver = null;
+        }
     },
 
     setupServiceWorker() {
@@ -335,6 +355,7 @@ const App = {
         document.getElementById('pass-input').value = '';
         this.state.key = null;
         this.state.currentHandle = null;
+        this.teardownFileObserver();
         this.state.isDirty = false;
         this.state.baseContent = null;
         this.state.lastMTime = 0;
@@ -491,6 +512,7 @@ const App = {
             document.getElementById('active-filename').textContent = h.name;
             document.getElementById('save-status').textContent = "Loaded from disk";
             await this.renderList();
+            await this.setupFileObserver(h);
         } catch (e) {
             document.getElementById('save-status').textContent = "⚠️ Error loading file";
         }
@@ -794,6 +816,7 @@ const App = {
 
             if (this.state.currentHandle?.name === name) {
                 this.state.currentHandle = null;
+                this.teardownFileObserver();
                 document.getElementById('editor').value = '';
                 document.getElementById('active-filename').textContent = 'No student selected';
             }
