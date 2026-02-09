@@ -217,7 +217,7 @@ const App = {
                 clearTimeout(this.state.fileObserverTimeout);
                 this.state.fileObserverTimeout = setTimeout(() => {
                     if (this.state.fileObserver !== observer) return;
-                    this.pollDisk();
+                    this.pollDisk().catch(() => {});
                 }, APP_CONFIG.OBSERVER_DEBOUNCE_MS);
             });
             this.state.fileObserver = observer;
