@@ -116,7 +116,7 @@
 
     <main>
         <div id="conflict-bar">
-            ⚠️ This file was updated on Drive. <button class="btn btn-primary" style="padding: 2px 8px; font-size: 12px;" onclick="App.syncNow()">Load Update</button>
+            ⚠️ This file was updated by another user. <button class="btn btn-primary" style="padding: 2px 8px; font-size: 12px;" onclick="App.syncNow()">Load Their Version</button> <button class="btn btn-outline" style="padding: 2px 8px; font-size: 12px;" onclick="App.keepMyVersion()">Keep My Version</button>
         </div>
         <header>
             <div id="active-filename" style="font-weight: 600; font-size: 16px;">No student selected</div>
@@ -154,6 +154,7 @@ const App = {
         currentHandle: null,
         lastMTime: 0,
         isDirty: false,
+        conflictDetected: false,
         saveTimeout: null,
         searchTimeout: null
     },
@@ -324,6 +325,7 @@ const App = {
         this.state.key = null;
         this.state.currentHandle = null;
         this.state.isDirty = false;
+        this.state.conflictDetected = false;
         this.state.lastMTime = 0;
 
         if (this.state.db) { this.state.db.close(); this.state.db = null; }
@@ -461,6 +463,7 @@ const App = {
             this.state.currentHandle = h;
             this.state.lastMTime = file.lastModified;
             this.state.isDirty = false;
+            this.state.conflictDetected = false;
 
             document.getElementById('editor').value = buffer.byteLength > 0 ? await this.decrypt(new Uint8Array(buffer)) : "";
             document.getElementById('active-filename').textContent = h.name;
@@ -472,10 +475,18 @@ const App = {
         }
     },
 
-    async save() {
+    async save(force = false) {
         if (!this.state.currentHandle || !this.state.key) return;
 
         try {
+            if (!force) {
+                const current = await this.state.currentHandle.getFile();
+                if (current.lastModified > this.state.lastMTime) {
+                    this.showConflict();
+                    return;
+                }
+            }
+
             const blob = await this.encrypt(document.getElementById('editor').value);
             const stream = await this.state.currentHandle.createWritable();
             await stream.write(blob);
@@ -484,6 +495,8 @@ const App = {
             const f = await this.state.currentHandle.getFile();
             this.state.lastMTime = f.lastModified;
             this.state.isDirty = false;
+            this.state.conflictDetected = false;
+            document.getElementById('conflict-bar').style.display = 'none';
             document.getElementById('save-status').textContent = "✓ Encrypted & Saved";
         } catch (e) {
             document.getElementById('save-status').textContent = "⚠️ Error Saving";
@@ -491,13 +504,20 @@ const App = {
     },
 
     // --- SYNC & CONFLICTS ---
+    showConflict() {
+        this.state.conflictDetected = true;
+        clearTimeout(this.state.saveTimeout);
+        document.getElementById('conflict-bar').style.display = 'block';
+        document.getElementById('save-status').textContent = "⚠️ Conflict — choose an action above";
+    },
+
     async pollDisk() {
         if (!this.state.currentHandle || !this.state.key) return;
         try {
             const file = await this.state.currentHandle.getFile();
             if (file.lastModified > this.state.lastMTime) {
                 if (this.state.isDirty) {
-                    document.getElementById('conflict-bar').style.display = 'block';
+                    this.showConflict();
                 } else {
                     await this.loadFile(this.state.currentHandle);
                 }
@@ -507,7 +527,15 @@ const App = {
 
     syncNow() {
         if (confirm("Load newest version? Unsaved changes will be lost.")) {
+            this.state.conflictDetected = false;
             this.loadFile(this.state.currentHandle);
+        }
+    },
+
+    keepMyVersion() {
+        if (confirm("This will overwrite the other user's changes with yours. Continue?")) {
+            this.state.conflictDetected = false;
+            this.save(true);
         }
     },
 
@@ -597,7 +625,9 @@ document.getElementById('editor').oninput = () => {
     App.state.isDirty = true;
     document.getElementById('save-status').textContent = "● Editing...";
     clearTimeout(App.state.saveTimeout);
-    App.state.saveTimeout = setTimeout(() => App.save(), APP_CONFIG.AUTO_SAVE_DELAY_MS);
+    if (!App.state.conflictDetected) {
+        App.state.saveTimeout = setTimeout(() => App.save(), APP_CONFIG.AUTO_SAVE_DELAY_MS);
+    }
 };
 
 // Enter key on password input
