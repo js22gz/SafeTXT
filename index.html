@@ -112,8 +112,8 @@
     <aside>
         <button class="btn btn-primary" onclick="App.createNote()">＋ Create New Note</button>
         <button class="btn btn-outline" onclick="App.importNote()">📂 Open Existing File</button>
-        <button class="btn btn-outline" id="save-btn" onclick="App.saveOrSaveAs()">💾 Save As...</button>
-        <button class="btn btn-outline" id="refresh-btn" onclick="App.refreshFile()">🔄 Refresh File</button>
+        <button class="btn btn-outline" id="save-btn" onclick="App.saveOrSaveAs()" aria-label="Save or save as new file">💾 Save As...</button>
+        <button class="btn btn-outline" id="refresh-btn" onclick="App.refreshFile()" aria-label="Refresh file from disk">🔄 Refresh File</button>
         
         <div id="file-list"></div>
 
@@ -573,9 +573,9 @@ const App = {
         const saveBtn = document.getElementById('save-btn');
         if (saveBtn) {
             if (this.state.currentHandle) {
-                saveBtn.innerHTML = '💾 Save';
+                saveBtn.textContent = '💾 Save';
             } else {
-                saveBtn.innerHTML = '💾 Save As...';
+                saveBtn.textContent = '💾 Save As...';
             }
         }
     },
