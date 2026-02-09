@@ -501,7 +501,7 @@ const App = {
 
         try {
             const blob = await this.encrypt(document.getElementById('editor').value);
-            const digest = await this.computeDigest(blob);
+            const digest = await this.computeDigest(blob.buffer);
             const stream = await this.state.currentHandle.createWritable();
             await stream.write(blob);
             await stream.close();
@@ -676,13 +676,13 @@ const App = {
 
             const file = await this.state.currentHandle.getFile();
             const mtimeNewer = file.lastModified > this.state.lastMTime;
-            const shouldCheckDigest = this.state.isDirty || mtimeNewer || !shouldThrottle;
-            if (!shouldCheckDigest) return;
+            if (!this.state.isDirty && !mtimeNewer && shouldThrottle) return;
             // Digest comparison catches shared-drive updates even when mtime stays the same.
             const buffer = await file.arrayBuffer();
             const digest = await this.computeDigest(buffer);
             if (digest === this.state.lastDigest) {
                 this.state.lastMTime = file.lastModified;
+                this.state.lastDigest = digest;
                 this.state.lastDigestCheck = now;
                 return;
             }
