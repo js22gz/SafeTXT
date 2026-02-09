@@ -501,14 +501,15 @@ const App = {
 
         try {
             const blob = await this.encrypt(document.getElementById('editor').value);
-            this.state.lastDigest = await this.digest(blob);
-            this.state.lastDigestCheck = Date.now();
             const stream = await this.state.currentHandle.createWritable();
             await stream.write(blob);
             await stream.close();
 
             const f = await this.state.currentHandle.getFile();
             this.state.lastMTime = f.lastModified;
+            const savedBuffer = await f.arrayBuffer();
+            this.state.lastDigest = await this.digest(savedBuffer);
+            this.state.lastDigestCheck = Date.now();
             this.state.isDirty = false;
             this.state.baseContent = document.getElementById('editor').value;
             document.getElementById('save-status').textContent = "✓ Encrypted & Saved";
