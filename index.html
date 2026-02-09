@@ -149,6 +149,7 @@ const APP_CONFIG = {
     IV_LENGTH: 12,
     PBKDF2_ITERATIONS: 600000,
     POLL_INTERVAL_MS: 4000,
+    DIGEST_CHECK_INTERVAL_MS: 15000,
     AUTO_SAVE_DELAY_MS: 1000,
     INACTIVITY_TIMEOUT_MS: 10 * 60 * 1000,
     DB_NAME: 'LocalNote_v2026', // preserve original name so existing users keep their file handles
@@ -162,6 +163,7 @@ const App = {
         currentHandle: null,
         lastMTime: 0,
         lastDigest: null,
+        lastDigestCheck: 0,
         isDirty: false,
         baseContent: null,
         saveTimeout: null,
@@ -337,6 +339,7 @@ const App = {
         this.state.baseContent = null;
         this.state.lastMTime = 0;
         this.state.lastDigest = null;
+        this.state.lastDigestCheck = 0;
 
         if (this.state.db) { this.state.db.close(); this.state.db = null; }
 
@@ -479,6 +482,7 @@ const App = {
             this.state.currentHandle = h;
             this.state.lastMTime = file.lastModified;
             this.state.lastDigest = digest;
+            this.state.lastDigestCheck = Date.now();
             this.state.isDirty = false;
 
             const text = buffer.byteLength > 0 ? await this.decrypt(new Uint8Array(buffer)) : "";
@@ -497,14 +501,14 @@ const App = {
 
         try {
             const blob = await this.encrypt(document.getElementById('editor').value);
+            this.state.lastDigest = await this.digest(blob);
+            this.state.lastDigestCheck = Date.now();
             const stream = await this.state.currentHandle.createWritable();
             await stream.write(blob);
             await stream.close();
 
             const f = await this.state.currentHandle.getFile();
             this.state.lastMTime = f.lastModified;
-            const savedBuffer = await f.arrayBuffer();
-            this.state.lastDigest = await this.digest(savedBuffer);
             this.state.isDirty = false;
             this.state.baseContent = document.getElementById('editor').value;
             document.getElementById('save-status').textContent = "✓ Encrypted & Saved";
@@ -666,8 +670,14 @@ const App = {
         if (!this.state.currentHandle || !this.state.key) return;
         try {
             const file = await this.state.currentHandle.getFile();
+            const now = Date.now();
+            const shouldCheckDigest = file.lastModified > this.state.lastMTime
+                || !this.state.lastDigest
+                || now - this.state.lastDigestCheck >= APP_CONFIG.DIGEST_CHECK_INTERVAL_MS;
+            if (!shouldCheckDigest) return;
             const buffer = await file.arrayBuffer();
             const digest = await this.digest(buffer);
+            this.state.lastDigestCheck = now;
             if (digest === this.state.lastDigest) {
                 this.state.lastMTime = file.lastModified;
                 return;
@@ -682,6 +692,7 @@ const App = {
                 this.state.baseContent = remoteText;
                 this.state.lastMTime = file.lastModified;
                 this.state.lastDigest = digest;
+                this.state.lastDigestCheck = now;
                 this.state.isDirty = false;
                 document.getElementById('save-status').textContent = 'Synced from disk';
                 return;
@@ -699,6 +710,7 @@ const App = {
                 this.state.baseContent = remoteText;
                 this.state.lastMTime = file.lastModified;
                 this.state.lastDigest = digest;
+                this.state.lastDigestCheck = now;
                 this.state.isDirty = false;
                 this.showToast('Remote updated — local edits backed up');
                 document.getElementById('save-status').textContent = 'Synced from disk';
@@ -706,13 +718,19 @@ const App = {
             }
 
             // If base matches remote, nothing new from remote
-            if (baseText === remoteText) { this.state.lastMTime = file.lastModified; this.state.lastDigest = digest; return; }
+            if (baseText === remoteText) {
+                this.state.lastMTime = file.lastModified;
+                this.state.lastDigest = digest;
+                this.state.lastDigestCheck = now;
+                return;
+            }
             // If base matches local, local had no real change
             if (baseText === localText) {
                 document.getElementById('editor').value = remoteText;
                 this.state.baseContent = remoteText;
                 this.state.lastMTime = file.lastModified;
                 this.state.lastDigest = digest;
+                this.state.lastDigestCheck = now;
                 this.state.isDirty = false;
                 document.getElementById('save-status').textContent = 'Synced from disk';
                 return;
@@ -727,6 +745,7 @@ const App = {
                     this.state.baseContent = merged;
                     this.state.lastMTime = file.lastModified;
                     this.state.lastDigest = digest;
+                    this.state.lastDigestCheck = now;
                     this.state.isDirty = true;
                     clearTimeout(this.state.saveTimeout);
                     this.state.saveTimeout = setTimeout(() => this.save(), APP_CONFIG.AUTO_SAVE_DELAY_MS);
@@ -738,6 +757,7 @@ const App = {
                     this.state.baseContent = remoteText;
                     this.state.lastMTime = file.lastModified;
                     this.state.lastDigest = digest;
+                    this.state.lastDigestCheck = now;
                     this.state.isDirty = true;
                     clearTimeout(this.state.saveTimeout);
                     this.state.saveTimeout = setTimeout(() => this.save(), APP_CONFIG.AUTO_SAVE_DELAY_MS);
@@ -751,6 +771,7 @@ const App = {
                 this.state.baseContent = remoteText;
                 this.state.lastMTime = file.lastModified;
                 this.state.lastDigest = digest;
+                this.state.lastDigestCheck = now;
                 this.state.isDirty = false;
                 this.showToast('Merge failed — local edits backed up, loaded remote version');
                 document.getElementById('save-status').textContent = '⚠️ Fallback to remote';
