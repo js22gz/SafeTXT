@@ -164,6 +164,7 @@ const App = {
         currentHandle: null,
         fileObserver: null,
         fileObserverTimeout: null,
+        pollInProgress: false,
         lastMTime: 0,
         lastDigest: null,
         lastDigestCheck: 0,
@@ -221,7 +222,7 @@ const App = {
         } catch (e) {
             this.teardownFileObserver();
             const reason = e?.name || 'unknown';
-            console.warn(`FileSystemObserver unavailable (${reason}); falling back to polling-only sync.`, e);
+            console.warn(`FileSystemObserver setup failed (${reason}); falling back to polling-only sync.`, e);
         }
     },
 
@@ -698,7 +699,8 @@ const App = {
 
     // --- SYNC ---
     async pollDisk() {
-        if (!this.state.currentHandle || !this.state.key) return;
+        if (!this.state.currentHandle || !this.state.key || this.state.pollInProgress) return;
+        this.state.pollInProgress = true;
         try {
             const now = Date.now();
             const hasDigest = this.state.lastDigest !== null;
@@ -813,6 +815,7 @@ const App = {
                 document.getElementById('save-status').textContent = '⚠️ Fallback to remote';
             }
         } catch (e) { /* polling failure — silent */ }
+        finally { this.state.pollInProgress = false; }
     },
 
     // --- SIDEBAR UI ---
