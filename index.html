@@ -91,7 +91,7 @@
 <div id="unlock-overlay" class="overlay">
     <div class="card">
         <h2 style="margin-top:0">SafeTXT</h2>
-        <p style="color: var(--text-sub); margin-bottom: 24px;">Enter your <strong>Shared Encryption Secret</strong> to unlock student notes for this session.</p>
+        <p style="color: var(--text-sub); margin-bottom: 24px;">Enter your <strong>Encryption Secret</strong> to decrypt files for this session.</p>
         
         <div style="position: relative;">
             <input type="password" id="pass-input" class="input-text" placeholder="Secret Key..." autocomplete="new-password" spellcheck="false">
@@ -122,7 +122,7 @@
 
     <main>
         <header>
-            <div id="active-filename" style="font-weight: 600; font-size: 16px;">No student selected</div>
+            <div id="active-filename" style="font-weight: 600; font-size: 16px;">No file selected</div>
             <div id="save-status" style="font-size: 12px; color: var(--text-sub)">Ready</div>
         </header>
         <textarea id="editor" placeholder="Select a note or create one to begin..." disabled></textarea>
