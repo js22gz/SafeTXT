@@ -112,7 +112,7 @@
     <aside>
         <button class="btn btn-primary" onclick="App.createNote()">＋ Create New Note</button>
         <button class="btn btn-outline" onclick="App.importNote()">📂 Open Existing File</button>
-        <button class="btn btn-outline" id="save-btn" onclick="App.saveOrSaveAs()" aria-label="Save or save as new file">💾 Save As...</button>
+        <button class="btn btn-outline" id="save-btn" onclick="App.saveOrSaveAs()">💾 Save As...</button>
         <button class="btn btn-outline" id="refresh-btn" onclick="App.refreshFile()" aria-label="Refresh file from disk">🔄 Refresh File</button>
         
         <div id="file-list"></div>
@@ -564,9 +564,17 @@ const App = {
             return;
         }
 
+        const statusBefore = document.getElementById('save-status').textContent;
+        document.getElementById('save-status').textContent = "🔄 Checking for updates...";
+        
         // Manually trigger the pollDisk to check for remote changes
         await this.pollDisk();
-        document.getElementById('save-status').textContent = "🔄 File refreshed";
+        
+        // If pollDisk updated the status, keep that message; otherwise, indicate no changes
+        const statusAfter = document.getElementById('save-status').textContent;
+        if (statusAfter === "🔄 Checking for updates...") {
+            document.getElementById('save-status').textContent = "✓ File is up to date";
+        }
     },
 
     updateSaveButtonLabel() {
@@ -574,8 +582,10 @@ const App = {
         if (saveBtn) {
             if (this.state.currentHandle) {
                 saveBtn.textContent = '💾 Save';
+                saveBtn.setAttribute('aria-label', 'Save current file');
             } else {
                 saveBtn.textContent = '💾 Save As...';
+                saveBtn.setAttribute('aria-label', 'Save as new file');
             }
         }
     },
