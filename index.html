@@ -149,6 +149,7 @@ const APP_CONFIG = {
     IV_LENGTH: 12,
     PBKDF2_ITERATIONS: 600000,
     POLL_INTERVAL_MS: 4000,
+    OBSERVER_DEBOUNCE_MS: 250,
     DIGEST_THROTTLE_MS: 15000, // throttle digest hashing to reduce shared-drive I/O
     AUTO_SAVE_DELAY_MS: 1000,
     INACTIVITY_TIMEOUT_MS: 10 * 60 * 1000,
@@ -212,12 +213,14 @@ const App = {
             this.teardownFileObserver();
             const observer = new FileSystemObserver(() => {
                 clearTimeout(this.state.fileObserverTimeout);
-                this.state.fileObserverTimeout = setTimeout(() => this.pollDisk(), 250);
+                this.state.fileObserverTimeout = setTimeout(() => this.pollDisk(), APP_CONFIG.OBSERVER_DEBOUNCE_MS);
             });
             this.state.fileObserver = observer;
             await observer.observe(handle);
         } catch (e) {
             this.state.fileObserver = null;
+            clearTimeout(this.state.fileObserverTimeout);
+            this.state.fileObserverTimeout = null;
             console.warn('FileSystemObserver setup failed:', e);
         }
     },
