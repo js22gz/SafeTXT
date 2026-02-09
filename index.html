@@ -220,7 +220,8 @@ const App = {
             await observer.observe(handle);
         } catch (e) {
             this.teardownFileObserver();
-            console.warn('FileSystemObserver unavailable; falling back to polling-only sync.', e);
+            const reason = e?.name || 'unknown';
+            console.warn(`FileSystemObserver unavailable (${reason}); falling back to polling-only sync.`, e);
         }
     },
 
