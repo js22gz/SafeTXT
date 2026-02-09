@@ -344,7 +344,6 @@ const App = {
     async lock(force = false) {
         if (!force && !confirm("Lock session? You will need to re-enter your key to view notes.")) return;
         clearTimeout(this.state.saveTimeout);
-        clearTimeout(this.state.searchTimeout);
         this.inactivityManager.cleanup();
 
         // Clear sensitive data from memory before reload tears down JS heap.
