@@ -484,7 +484,14 @@ const App = {
             this.state.lastDigest = digest;
             this.state.lastDigestCheck = Date.now();
             this.state.isDirty = false;
-
+            
+            if ('FileSystemObserver' in window) {
+                const observer = new FileSystemObserver((records) => {
+                    // Filter for your file, then call pollDisk() or custom update
+                    this.pollDisk();
+                });
+                await observer.observe(this.state.currentHandle);  // Or directory if needed
+}
             const text = buffer.byteLength > 0 ? await this.decrypt(new Uint8Array(buffer)) : "";
             this.state.baseContent = text;
             document.getElementById('editor').value = text;
