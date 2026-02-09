@@ -162,6 +162,7 @@ const App = {
         key: null,
         currentHandle: null,
         fileObserver: null,
+        fileObserverTimeout: null,
         lastMTime: 0,
         lastDigest: null,
         lastDigestCheck: 0,
@@ -201,6 +202,8 @@ const App = {
     teardownFileObserver() {
         if (this.state.fileObserver?.disconnect) this.state.fileObserver.disconnect();
         this.state.fileObserver = null;
+        clearTimeout(this.state.fileObserverTimeout);
+        this.state.fileObserverTimeout = null;
     },
 
     async setupFileObserver(handle) {
@@ -208,12 +211,14 @@ const App = {
         try {
             this.teardownFileObserver();
             const observer = new FileSystemObserver(() => {
-                this.pollDisk();
+                clearTimeout(this.state.fileObserverTimeout);
+                this.state.fileObserverTimeout = setTimeout(() => this.pollDisk(), 250);
             });
             this.state.fileObserver = observer;
             await observer.observe(handle);
         } catch (e) {
             this.state.fileObserver = null;
+            console.warn('FileSystemObserver setup failed:', e);
         }
     },
 
