@@ -211,16 +211,16 @@ const App = {
         if (!handle || !('FileSystemObserver' in window)) return;
         try {
             this.teardownFileObserver();
+            let observerTimeout = null;
             const observer = new FileSystemObserver(() => {
-                clearTimeout(this.state.fileObserverTimeout);
-                this.state.fileObserverTimeout = setTimeout(() => this.pollDisk(), APP_CONFIG.OBSERVER_DEBOUNCE_MS);
+                clearTimeout(observerTimeout);
+                observerTimeout = setTimeout(() => this.pollDisk(), APP_CONFIG.OBSERVER_DEBOUNCE_MS);
+                this.state.fileObserverTimeout = observerTimeout;
             });
             this.state.fileObserver = observer;
             await observer.observe(handle);
         } catch (e) {
-            this.state.fileObserver = null;
-            clearTimeout(this.state.fileObserverTimeout);
-            this.state.fileObserverTimeout = null;
+            this.teardownFileObserver();
             console.warn('FileSystemObserver setup failed:', e);
         }
     },
