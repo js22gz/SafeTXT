@@ -24,7 +24,6 @@
 
         /* Sidebar */
         aside { background: var(--sidebar-bg); border-right: 1px solid var(--border); display: flex; flex-direction: column; padding: 16px; gap: 12px; }
-        .sidebar-label { font-size: 11px; font-weight: bold; color: var(--text-sub); text-transform: uppercase; margin-top: 10px; }
         
         #file-list { flex-grow: 1; overflow-y: auto; margin-top: 8px; }
         .file-item { 
@@ -113,11 +112,9 @@
     <aside>
         <button class="btn btn-primary" onclick="App.createNote()">＋ Create New Note</button>
         <button class="btn btn-outline" onclick="App.importNote()">📂 Open Existing File</button>
+        <button class="btn btn-outline" id="save-btn" onclick="App.saveOrSaveAs()" aria-label="Save as new file">💾 Save As...</button>
+        <button class="btn btn-outline" id="refresh-btn" onclick="App.refreshFile()" aria-label="Refresh file from disk">🔄 Refresh File</button>
         
-        <div class="sidebar-label">Search Student</div>
-        <input type="text" id="search" class="input-text" style="margin-bottom:4px" placeholder="Type to filter...">
-        
-        <div class="sidebar-label">Recently Opened</div>
         <div id="file-list"></div>
 
         <button class="btn btn-outline" style="margin-top:auto; border-color: #f5c2c7; color: var(--danger)" onclick="App.lock()">🔒 Lock & Clear Session</button>
@@ -170,8 +167,7 @@ const App = {
         lastDigestCheck: 0,
         isDirty: false,
         baseContent: null,
-        saveTimeout: null,
-        searchTimeout: null
+        saveTimeout: null
     },
 
     async init() {
@@ -187,7 +183,6 @@ const App = {
             });
 
             this.setupFileListHandlers();
-            this.setupSearchInput();
             await this.renderList();
             this.setupPolling();
             this.setupServiceWorker();
@@ -270,13 +265,6 @@ const App = {
         });
     },
 
-    setupSearchInput() {
-        document.getElementById('search').addEventListener('input', () => {
-            clearTimeout(this.state.searchTimeout);
-            this.state.searchTimeout = setTimeout(() => this.renderList(), 300);
-        });
-    },
-
     // --- INACTIVITY TIMER ---
     inactivityManager: {
         INACTIVITY_THRESHOLD: APP_CONFIG.INACTIVITY_TIMEOUT_MS,
@@ -349,13 +337,13 @@ const App = {
         document.getElementById('app-shell').classList.remove('blur');
         document.getElementById('editor').disabled = false;
         document.getElementById('save-status').textContent = "Session Active";
+        this.updateSaveButtonLabel();
         this.inactivityManager.init();
     },
 
     async lock(force = false) {
         if (!force && !confirm("Lock session? You will need to re-enter your key to view notes.")) return;
         clearTimeout(this.state.saveTimeout);
-        clearTimeout(this.state.searchTimeout);
         this.inactivityManager.cleanup();
 
         // Clear sensitive data from memory before reload tears down JS heap.
@@ -368,6 +356,7 @@ const App = {
         document.getElementById('pass-input').value = '';
         this.state.key = null;
         this.state.currentHandle = null;
+        this.updateSaveButtonLabel();
         this.teardownFileObserver();
         this.state.isDirty = false;
         this.state.baseContent = null;
@@ -514,6 +503,7 @@ const App = {
             const digest = await this.computeDigest(buffer);
 
             this.state.currentHandle = h;
+            this.updateSaveButtonLabel();
             this.state.lastMTime = file.lastModified;
             this.state.lastDigest = digest;
             this.state.lastDigestCheck = Date.now();
@@ -550,6 +540,52 @@ const App = {
             document.getElementById('save-status').textContent = "✓ Encrypted & Saved";
         } catch (e) {
             document.getElementById('save-status').textContent = "⚠️ Error Saving";
+        }
+    },
+
+    async saveOrSaveAs() {
+        if (!this.state.key) {
+            document.getElementById('save-status').textContent = "⚠️ Session locked";
+            return;
+        }
+
+        if (this.state.currentHandle) {
+            // File already exists, just save
+            await this.save();
+        } else {
+            // No file open, do Save As (create new note)
+            await this.createNote();
+        }
+    },
+
+    async refreshFile() {
+        if (!this.state.currentHandle || !this.state.key) {
+            document.getElementById('save-status').textContent = "⚠️ No file to refresh";
+            return;
+        }
+
+        document.getElementById('save-status').textContent = "🔄 Checking for updates...";
+        
+        // Manually trigger the pollDisk to check for remote changes
+        await this.pollDisk();
+        
+        // If pollDisk updated the status, keep that message; otherwise, indicate no changes
+        const statusAfter = document.getElementById('save-status').textContent;
+        if (statusAfter === "🔄 Checking for updates...") {
+            document.getElementById('save-status').textContent = "✓ File is up to date";
+        }
+    },
+
+    updateSaveButtonLabel() {
+        const saveBtn = document.getElementById('save-btn');
+        if (saveBtn) {
+            if (this.state.currentHandle) {
+                saveBtn.textContent = '💾 Save';
+                saveBtn.setAttribute('aria-label', 'Save current file');
+            } else {
+                saveBtn.textContent = '💾 Save As...';
+                saveBtn.setAttribute('aria-label', 'Save as new file');
+            }
         }
     },
 
@@ -831,6 +867,7 @@ const App = {
 
             if (this.state.currentHandle?.name === name) {
                 this.state.currentHandle = null;
+                this.updateSaveButtonLabel();
                 this.teardownFileObserver();
                 document.getElementById('editor').value = '';
                 document.getElementById('active-filename').textContent = 'No student selected';
@@ -841,7 +878,6 @@ const App = {
 
     async renderList() {
         const list = document.getElementById('file-list');
-        const filter = document.getElementById('search').value.toLowerCase();
 
         if (!this.state.db) {
             list.textContent = '';
@@ -860,8 +896,6 @@ const App = {
             const fragment = document.createDocumentFragment();
 
             sorted.forEach(h => {
-                if (filter && !h.name.toLowerCase().includes(filter)) return;
-
                 const item = document.createElement('div');
                 item.className = `file-item ${this.state.currentHandle?.name === h.name ? 'active' : ''}`;
                 item.setAttribute('data-filename', h.name);
