@@ -211,11 +211,9 @@ const App = {
         if (!handle || !('FileSystemObserver' in window)) return;
         try {
             this.teardownFileObserver();
-            let observerTimeout = null;
             const observer = new FileSystemObserver(() => {
-                clearTimeout(observerTimeout);
-                observerTimeout = setTimeout(() => this.pollDisk(), APP_CONFIG.OBSERVER_DEBOUNCE_MS);
-                this.state.fileObserverTimeout = observerTimeout;
+                clearTimeout(this.state.fileObserverTimeout);
+                this.state.fileObserverTimeout = setTimeout(() => this.pollDisk(), APP_CONFIG.OBSERVER_DEBOUNCE_MS);
             });
             this.state.fileObserver = observer;
             await observer.observe(handle);
