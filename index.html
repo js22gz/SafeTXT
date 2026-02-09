@@ -161,6 +161,7 @@ const App = {
         key: null,
         currentHandle: null,
         lastMTime: 0,
+        lastDigest: null,
         isDirty: false,
         baseContent: null,
         saveTimeout: null,
@@ -335,6 +336,7 @@ const App = {
         this.state.isDirty = false;
         this.state.baseContent = null;
         this.state.lastMTime = 0;
+        this.state.lastDigest = null;
 
         if (this.state.db) { this.state.db.close(); this.state.db = null; }
 
@@ -403,6 +405,11 @@ const App = {
         }
     },
 
+    async digest(buffer) {
+        const hash = await crypto.subtle.digest('SHA-256', buffer);
+        return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('');
+    },
+
     // --- FILE OPERATIONS ---
     async createNote() {
         try {
@@ -467,9 +474,11 @@ const App = {
 
             const file = await h.getFile();
             const buffer = await file.arrayBuffer();
+            const digest = await this.digest(buffer);
 
             this.state.currentHandle = h;
             this.state.lastMTime = file.lastModified;
+            this.state.lastDigest = digest;
             this.state.isDirty = false;
 
             const text = buffer.byteLength > 0 ? await this.decrypt(new Uint8Array(buffer)) : "";
@@ -494,6 +503,7 @@ const App = {
 
             const f = await this.state.currentHandle.getFile();
             this.state.lastMTime = f.lastModified;
+            this.state.lastDigest = await this.digest(blob);
             this.state.isDirty = false;
             this.state.baseContent = document.getElementById('editor').value;
             document.getElementById('save-status').textContent = "✓ Encrypted & Saved";
@@ -655,10 +665,11 @@ const App = {
         if (!this.state.currentHandle || !this.state.key) return;
         try {
             const file = await this.state.currentHandle.getFile();
-            if (file.lastModified <= this.state.lastMTime) return;
+            const buffer = await file.arrayBuffer();
+            const digest = await this.digest(buffer);
+            if (digest === this.state.lastDigest) { this.state.lastMTime = file.lastModified; return; }
 
             clearTimeout(this.state.saveTimeout);
-            const buffer = await file.arrayBuffer();
             const remoteText = buffer.byteLength > 0 ? await this.decrypt(new Uint8Array(buffer)) : '';
 
             // If user hasn't edited locally, just reload silently
@@ -666,6 +677,7 @@ const App = {
                 document.getElementById('editor').value = remoteText;
                 this.state.baseContent = remoteText;
                 this.state.lastMTime = file.lastModified;
+                this.state.lastDigest = digest;
                 this.state.isDirty = false;
                 document.getElementById('save-status').textContent = 'Synced from disk';
                 return;
@@ -682,6 +694,7 @@ const App = {
                 document.getElementById('editor').value = remoteText;
                 this.state.baseContent = remoteText;
                 this.state.lastMTime = file.lastModified;
+                this.state.lastDigest = digest;
                 this.state.isDirty = false;
                 this.showToast('Remote updated — local edits backed up');
                 document.getElementById('save-status').textContent = 'Synced from disk';
@@ -689,12 +702,13 @@ const App = {
             }
 
             // If base matches remote, nothing new from remote
-            if (baseText === remoteText) { this.state.lastMTime = file.lastModified; return; }
+            if (baseText === remoteText) { this.state.lastMTime = file.lastModified; this.state.lastDigest = digest; return; }
             // If base matches local, local had no real change
             if (baseText === localText) {
                 document.getElementById('editor').value = remoteText;
                 this.state.baseContent = remoteText;
                 this.state.lastMTime = file.lastModified;
+                this.state.lastDigest = digest;
                 this.state.isDirty = false;
                 document.getElementById('save-status').textContent = 'Synced from disk';
                 return;
@@ -708,6 +722,7 @@ const App = {
                     document.getElementById('editor').value = merged;
                     this.state.baseContent = merged;
                     this.state.lastMTime = file.lastModified;
+                    this.state.lastDigest = digest;
                     this.state.isDirty = true;
                     clearTimeout(this.state.saveTimeout);
                     this.state.saveTimeout = setTimeout(() => this.save(), APP_CONFIG.AUTO_SAVE_DELAY_MS);
@@ -718,6 +733,7 @@ const App = {
                     document.getElementById('editor').value = merged;
                     this.state.baseContent = remoteText;
                     this.state.lastMTime = file.lastModified;
+                    this.state.lastDigest = digest;
                     this.state.isDirty = true;
                     clearTimeout(this.state.saveTimeout);
                     this.state.saveTimeout = setTimeout(() => this.save(), APP_CONFIG.AUTO_SAVE_DELAY_MS);
@@ -730,6 +746,7 @@ const App = {
                 document.getElementById('editor').value = remoteText;
                 this.state.baseContent = remoteText;
                 this.state.lastMTime = file.lastModified;
+                this.state.lastDigest = digest;
                 this.state.isDirty = false;
                 this.showToast('Merge failed — local edits backed up, loaded remote version');
                 document.getElementById('save-status').textContent = '⚠️ Fallback to remote';
