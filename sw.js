@@ -1,5 +1,5 @@
 // Cache versioning for automatic cleanup
-const CACHE_VERSION = 1.0;
+const CACHE_VERSION = 2;
 const CACHE_NAME = `SafeTXT-v${CACHE_VERSION}`;
 const ASSETS = [
   './index.html',
