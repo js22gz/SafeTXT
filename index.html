@@ -39,7 +39,6 @@
         /* Main Stage */
         main { display: flex; flex-direction: column; background: var(--bg); position: relative; }
         header { padding: 12px 24px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; background: white; z-index: 10; }
-        #conflict-bar { display: none; background: #fce8e6; color: var(--danger); padding: 10px; text-align: center; font-weight: bold; border-bottom: 1px solid #f5c2c7; }
         
         #editor { 
             flex-grow: 1; border: none; outline: none; padding: 40px; 
@@ -115,9 +114,6 @@
     </aside>
 
     <main>
-        <div id="conflict-bar">
-            ⚠️ This file was updated by another user. <button class="btn btn-primary" style="padding: 2px 8px; font-size: 12px;" onclick="App.syncNow()">Load Their Version</button> <button class="btn btn-outline" style="padding: 2px 8px; font-size: 12px;" onclick="App.keepMyVersion()">Keep My Version</button>
-        </div>
         <header>
             <div id="active-filename" style="font-weight: 600; font-size: 16px;">No student selected</div>
             <div id="save-status" style="font-size: 12px; color: var(--text-sub)">Ready</div>
@@ -154,7 +150,6 @@ const App = {
         currentHandle: null,
         lastMTime: 0,
         isDirty: false,
-        conflictDetected: false,
         saveTimeout: null,
         searchTimeout: null
     },
@@ -325,7 +320,6 @@ const App = {
         this.state.key = null;
         this.state.currentHandle = null;
         this.state.isDirty = false;
-        this.state.conflictDetected = false;
         this.state.lastMTime = 0;
 
         if (this.state.db) { this.state.db.close(); this.state.db = null; }
@@ -463,11 +457,9 @@ const App = {
             this.state.currentHandle = h;
             this.state.lastMTime = file.lastModified;
             this.state.isDirty = false;
-            this.state.conflictDetected = false;
 
             document.getElementById('editor').value = buffer.byteLength > 0 ? await this.decrypt(new Uint8Array(buffer)) : "";
             document.getElementById('active-filename').textContent = h.name;
-            document.getElementById('conflict-bar').style.display = 'none';
             document.getElementById('save-status').textContent = "Loaded from disk";
             await this.renderList();
         } catch (e) {
@@ -475,18 +467,10 @@ const App = {
         }
     },
 
-    async save(force = false) {
+    async save() {
         if (!this.state.currentHandle || !this.state.key) return;
 
         try {
-            if (!force) {
-                const current = await this.state.currentHandle.getFile();
-                if (current.lastModified > this.state.lastMTime) {
-                    this.showConflict();
-                    return;
-                }
-            }
-
             const blob = await this.encrypt(document.getElementById('editor').value);
             const stream = await this.state.currentHandle.createWritable();
             await stream.write(blob);
@@ -495,48 +479,22 @@ const App = {
             const f = await this.state.currentHandle.getFile();
             this.state.lastMTime = f.lastModified;
             this.state.isDirty = false;
-            this.state.conflictDetected = false;
-            document.getElementById('conflict-bar').style.display = 'none';
             document.getElementById('save-status').textContent = "✓ Encrypted & Saved";
         } catch (e) {
             document.getElementById('save-status').textContent = "⚠️ Error Saving";
         }
     },
 
-    // --- SYNC & CONFLICTS ---
-    showConflict() {
-        this.state.conflictDetected = true;
-        clearTimeout(this.state.saveTimeout);
-        document.getElementById('conflict-bar').style.display = 'block';
-        document.getElementById('save-status').textContent = "⚠️ Conflict — choose an action above";
-    },
-
+    // --- SYNC ---
     async pollDisk() {
         if (!this.state.currentHandle || !this.state.key) return;
         try {
             const file = await this.state.currentHandle.getFile();
             if (file.lastModified > this.state.lastMTime) {
-                if (this.state.isDirty) {
-                    this.showConflict();
-                } else {
-                    await this.loadFile(this.state.currentHandle);
-                }
+                clearTimeout(this.state.saveTimeout);
+                await this.loadFile(this.state.currentHandle);
             }
         } catch (e) { /* polling failure — silent */ }
-    },
-
-    syncNow() {
-        if (confirm("Load newest version? Unsaved changes will be lost.")) {
-            this.state.conflictDetected = false;
-            this.loadFile(this.state.currentHandle);
-        }
-    },
-
-    keepMyVersion() {
-        if (confirm("This will overwrite the other user's changes with yours. Continue?")) {
-            this.state.conflictDetected = false;
-            this.save(true);
-        }
     },
 
     // --- SIDEBAR UI ---
@@ -625,9 +583,7 @@ document.getElementById('editor').oninput = () => {
     App.state.isDirty = true;
     document.getElementById('save-status').textContent = "● Editing...";
     clearTimeout(App.state.saveTimeout);
-    if (!App.state.conflictDetected) {
-        App.state.saveTimeout = setTimeout(() => App.save(), APP_CONFIG.AUTO_SAVE_DELAY_MS);
-    }
+    App.state.saveTimeout = setTimeout(() => App.save(), APP_CONFIG.AUTO_SAVE_DELAY_MS);
 };
 
 // Enter key on password input
