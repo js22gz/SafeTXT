@@ -94,7 +94,7 @@
         <p style="color: var(--text-sub); margin-bottom: 24px;">Enter your <strong>Encryption Secret</strong> to decrypt files for this session.</p>
         
         <div style="position: relative;">
-            <input type="password" id="pass-input" class="input-text" placeholder="Secret Key..." autocomplete="off" spellcheck="false">
+            <input type="password" id="pass-input" class="input-text" placeholder="Secret Key..." autocomplete="one-time-code" spellcheck="false">
             <button type="button" onclick="App.togglePass()" aria-label="Toggle password visibility" style="position: absolute; right: 10px; top: 12px; border:none; background:none; cursor:pointer;">👁️</button>
         </div>
         
@@ -425,9 +425,11 @@ const App = {
             this.state.passInputKeypressHandler = null;
         }
 
-        // Clear sensitive data from memory before reload tears down JS heap.
-        const randomPad = crypto.getRandomValues(new Uint8Array(128));
-        const randomStr = Array.from(randomPad).map(b => String.fromCharCode(b)).join('');
+        // Clear sensitive data from memory before reload.
+        // Note: Due to string immutability in JS, original values persist in memory
+        // until GC. This is a best-effort approach to minimize exposure.
+        const randomBytes = crypto.getRandomValues(new Uint8Array(128));
+        const randomStr = btoa(String.fromCharCode(...randomBytes)).substring(0, 256);
         
         if (editor) {
             editor.value = randomStr;
@@ -438,12 +440,7 @@ const App = {
             passInput.value = '';
         }
         
-        // Overwrite key material
-        if (this.state.key) {
-            const keyLength = this.state.key.length;
-            this.state.key = randomStr.substring(0, keyLength);
-        }
-        
+        // Clear key references (original string will persist until GC)
         this.state.key = null;
         this.state.sessionSalt = null;
         this.state.cachedCryptoKey = null;
