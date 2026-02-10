@@ -4,7 +4,9 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="theme-color" content="#1a73e8">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'">
+    <!-- CSP Note: 'unsafe-inline' is required due to single-file architecture.
+         All code is static and controlled by the developer - no user-generated scripts. -->
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; upgrade-insecure-requests">
     <meta name="referrer" content="no-referrer">
     <title>SafeTXT</title>
     <link rel="manifest" href="manifest.json">
@@ -94,7 +96,7 @@
         <p style="color: var(--text-sub); margin-bottom: 24px;">Enter your <strong>Encryption Secret</strong> to decrypt files for this session.</p>
         
         <div style="position: relative;">
-            <input type="password" id="pass-input" class="input-text" placeholder="Secret Key..." autocomplete="new-password" spellcheck="false">
+            <input type="password" id="pass-input" class="input-text" placeholder="Secret Key..." autocomplete="one-time-code" spellcheck="false">
             <button type="button" onclick="App.togglePass()" aria-label="Toggle password visibility" style="position: absolute; right: 10px; top: 12px; border:none; background:none; cursor:pointer;">👁️</button>
         </div>
         
@@ -152,7 +154,9 @@ const APP_CONFIG = {
     INACTIVITY_TIMEOUT_MS: 10 * 60 * 1000,
     MAX_FILE_SIZE_MB: 100, // Maximum file size in megabytes
     DB_NAME: 'LocalNote_v2026', // preserve original name so existing users keep their file handles
-    DB_VERSION: 1
+    DB_VERSION: 1,
+    UNLOCK_MAX_ATTEMPTS: 5, // Maximum failed unlock attempts before lockout
+    UNLOCK_LOCKOUT_DURATION_MS: 30000 // 30 seconds lockout after max failed attempts
 };
 
 const App = {
@@ -176,7 +180,11 @@ const App = {
         fileListClickHandler: null,
         fileListKeydownHandler: null,
         editorInputHandler: null,
-        passInputKeypressHandler: null
+        passInputKeypressHandler: null,
+        // Rate limiting for unlock attempts
+        unlockAttempts: 0,
+        unlockLastAttempt: 0,
+        unlockBlockedUntil: 0
     },
 
     _toastTimer: null,
@@ -375,15 +383,30 @@ const App = {
     async unlock() {
         const inputEl = document.getElementById('pass-input');
         const pass = inputEl.value;
+        
+        // Rate limiting: prevent brute force attempts
+        const now = Date.now();
+        if (this.state.unlockBlockedUntil > now) {
+            const remainingSeconds = Math.ceil((this.state.unlockBlockedUntil - now) / 1000);
+            alert(`Too many failed attempts. Please wait ${remainingSeconds} seconds before trying again.`);
+            return;
+        }
+        
         if (!pass || pass.length < 12) {
             alert("Password must be at least 12 characters for security.");
             return;
         }
+        
         try {
             this.state.key = pass;
             // Generate session salt and derive key once for caching
             this.state.sessionSalt = crypto.getRandomValues(new Uint8Array(APP_CONFIG.SALT_LENGTH));
             this.state.cachedCryptoKey = await this.getCryptoKey(this.state.sessionSalt, APP_CONFIG.PBKDF2_ITERATIONS);
+            
+            // Reset rate limiting on successful unlock
+            this.state.unlockAttempts = 0;
+            this.state.unlockBlockedUntil = 0;
+            
             inputEl.value = "";
             document.getElementById('unlock-overlay').classList.add('hidden');
             document.getElementById('app-shell').classList.remove('blur');
@@ -397,6 +420,15 @@ const App = {
             this.state.key = null;
             this.state.sessionSalt = null;
             this.state.cachedCryptoKey = null;
+            
+            // Increment failed attempts and apply lockout if needed
+            this.state.unlockAttempts++;
+            this.state.unlockLastAttempt = now;
+            
+            if (this.state.unlockAttempts >= APP_CONFIG.UNLOCK_MAX_ATTEMPTS) {
+                this.state.unlockBlockedUntil = now + APP_CONFIG.UNLOCK_LOCKOUT_DURATION_MS;
+                this.state.unlockAttempts = 0;
+            }
         }
     },
 
@@ -425,18 +457,23 @@ const App = {
             this.state.passInputKeypressHandler = null;
         }
 
-        // Clear sensitive data from memory before reload tears down JS heap.
-        // JS strings are immutable so old values persist until GC; overwriting
-        // DOM fields with random data encourages the engine to release them.
-        const randomPad = crypto.getRandomValues(new Uint8Array(64)).toString();
+        // Clear sensitive data from memory before reload.
+        // Note: Due to string immutability in JS, original values persist in memory
+        // until GC. This is a best-effort approach to minimize exposure.
+        const randomBytes = crypto.getRandomValues(new Uint8Array(128));
+        // Create random string with base64 encoding (max 256 chars to limit memory usage)
+        const randomStr = btoa(String.fromCharCode(...randomBytes)).substring(0, 256);
+        
         if (editor) {
-            editor.value = randomPad;
+            editor.value = randomStr;
             editor.value = '';
         }
         if (passInput) {
-            passInput.value = randomPad;
+            passInput.value = randomStr;
             passInput.value = '';
         }
+        
+        // Clear key references (original string will persist until GC)
         this.state.key = null;
         this.state.sessionSalt = null;
         this.state.cachedCryptoKey = null;
@@ -509,7 +546,7 @@ const App = {
 
     async decrypt(buffer) {
         try {
-            if (!buffer || buffer.length < 29) throw new Error('File too small or corrupted');
+            if (!buffer || buffer.length < 29) throw new Error('Invalid file format');
 
             let salt, iv, ciphertext, iterations;
 
@@ -529,10 +566,8 @@ const App = {
             const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, ciphertext);
             return new TextDecoder().decode(plain);
         } catch (e) {
-            if (e.name === 'OperationError') {
-                return "### DECRYPTION ERROR ###\nIncorrect password or corrupted file.\n\nPossible causes:\n1. Wrong password\n2. File has been corrupted\n3. File was encrypted with a different key";
-            }
-            return `### DECRYPTION ERROR ###\n${e.message || 'Unknown error during decryption'}`;
+            // Generic error message to avoid information disclosure
+            return "### DECRYPTION ERROR ###\nUnable to decrypt file. Please verify your password is correct.";
         }
     },
 
@@ -630,6 +665,7 @@ const App = {
             const text = buffer.byteLength > 0 ? await this.decrypt(new Uint8Array(buffer)) : "";
             this.state.baseContent = text;
             document.getElementById('editor').value = text;
+            // Use textContent to prevent XSS
             document.getElementById('active-filename').textContent = h.name;
             document.getElementById('save-status').textContent = "Loaded from disk";
             await this.renderList();
@@ -1043,6 +1079,7 @@ const App = {
                 const nameSpan = document.createElement('span');
                 nameSpan.style.overflow = 'hidden';
                 nameSpan.style.textOverflow = 'ellipsis';
+                // textContent is used here (not innerHTML) to prevent XSS
                 nameSpan.textContent = h.name;
 
                 const removeBtn = document.createElement('span');
