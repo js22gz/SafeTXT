@@ -4,6 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="theme-color" content="#1a73e8">
+    <!-- CSP Note: 'unsafe-inline' is required due to single-file architecture.
+         All code is static and controlled by the developer - no user-generated scripts. -->
     <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; upgrade-insecure-requests">
     <meta name="referrer" content="no-referrer">
     <title>SafeTXT</title>
@@ -152,7 +154,9 @@ const APP_CONFIG = {
     INACTIVITY_TIMEOUT_MS: 10 * 60 * 1000,
     MAX_FILE_SIZE_MB: 100, // Maximum file size in megabytes
     DB_NAME: 'LocalNote_v2026', // preserve original name so existing users keep their file handles
-    DB_VERSION: 1
+    DB_VERSION: 1,
+    UNLOCK_MAX_ATTEMPTS: 5, // Maximum failed unlock attempts before lockout
+    UNLOCK_LOCKOUT_DURATION_MS: 30000 // 30 seconds lockout after max failed attempts
 };
 
 const App = {
@@ -390,14 +394,6 @@ const App = {
         
         if (!pass || pass.length < 12) {
             alert("Password must be at least 12 characters for security.");
-            this.state.unlockAttempts++;
-            this.state.unlockLastAttempt = now;
-            
-            // Block after 5 failed attempts
-            if (this.state.unlockAttempts >= 5) {
-                this.state.unlockBlockedUntil = now + 30000; // 30 seconds
-                this.state.unlockAttempts = 0;
-            }
             return;
         }
         
@@ -425,12 +421,12 @@ const App = {
             this.state.sessionSalt = null;
             this.state.cachedCryptoKey = null;
             
+            // Increment failed attempts and apply lockout if needed
             this.state.unlockAttempts++;
             this.state.unlockLastAttempt = now;
             
-            // Block after 5 failed attempts
-            if (this.state.unlockAttempts >= 5) {
-                this.state.unlockBlockedUntil = now + 30000; // 30 seconds
+            if (this.state.unlockAttempts >= APP_CONFIG.UNLOCK_MAX_ATTEMPTS) {
+                this.state.unlockBlockedUntil = now + APP_CONFIG.UNLOCK_LOCKOUT_DURATION_MS;
                 this.state.unlockAttempts = 0;
             }
         }
@@ -465,6 +461,7 @@ const App = {
         // Note: Due to string immutability in JS, original values persist in memory
         // until GC. This is a best-effort approach to minimize exposure.
         const randomBytes = crypto.getRandomValues(new Uint8Array(128));
+        // Create random string with base64 encoding (max 256 chars to limit memory usage)
         const randomStr = btoa(String.fromCharCode(...randomBytes)).substring(0, 256);
         
         if (editor) {
@@ -1082,7 +1079,7 @@ const App = {
                 const nameSpan = document.createElement('span');
                 nameSpan.style.overflow = 'hidden';
                 nameSpan.style.textOverflow = 'ellipsis';
-                // Use textContent instead of innerHTML to prevent XSS
+                // textContent is used here (not innerHTML) to prevent XSS
                 nameSpan.textContent = h.name;
 
                 const removeBtn = document.createElement('span');
