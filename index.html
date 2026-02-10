@@ -94,7 +94,7 @@
         <p style="color: var(--text-sub); margin-bottom: 24px;">Enter your <strong>Encryption Secret</strong> to decrypt files for this session.</p>
         
         <div style="position: relative;">
-            <input type="password" id="pass-input" class="input-text" placeholder="Secret Key..." autocomplete="new-password" spellcheck="false">
+            <input type="password" id="pass-input" class="input-text" placeholder="Secret Key..." autocomplete="off" spellcheck="false">
             <button type="button" onclick="App.togglePass()" aria-label="Toggle password visibility" style="position: absolute; right: 10px; top: 12px; border:none; background:none; cursor:pointer;">👁️</button>
         </div>
         
@@ -426,17 +426,24 @@ const App = {
         }
 
         // Clear sensitive data from memory before reload tears down JS heap.
-        // JS strings are immutable so old values persist until GC; overwriting
-        // DOM fields with random data encourages the engine to release them.
-        const randomPad = crypto.getRandomValues(new Uint8Array(64)).toString();
+        const randomPad = crypto.getRandomValues(new Uint8Array(128));
+        const randomStr = Array.from(randomPad).map(b => String.fromCharCode(b)).join('');
+        
         if (editor) {
-            editor.value = randomPad;
+            editor.value = randomStr;
             editor.value = '';
         }
         if (passInput) {
-            passInput.value = randomPad;
+            passInput.value = randomStr;
             passInput.value = '';
         }
+        
+        // Overwrite key material
+        if (this.state.key) {
+            const keyLength = this.state.key.length;
+            this.state.key = randomStr.substring(0, keyLength);
+        }
+        
         this.state.key = null;
         this.state.sessionSalt = null;
         this.state.cachedCryptoKey = null;
@@ -509,7 +516,7 @@ const App = {
 
     async decrypt(buffer) {
         try {
-            if (!buffer || buffer.length < 29) throw new Error('File too small or corrupted');
+            if (!buffer || buffer.length < 29) throw new Error('Invalid file format');
 
             let salt, iv, ciphertext, iterations;
 
@@ -529,10 +536,8 @@ const App = {
             const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, ciphertext);
             return new TextDecoder().decode(plain);
         } catch (e) {
-            if (e.name === 'OperationError') {
-                return "### DECRYPTION ERROR ###\nIncorrect password or corrupted file.\n\nPossible causes:\n1. Wrong password\n2. File has been corrupted\n3. File was encrypted with a different key";
-            }
-            return `### DECRYPTION ERROR ###\n${e.message || 'Unknown error during decryption'}`;
+            // Generic error message to avoid information disclosure
+            return "### DECRYPTION ERROR ###\nUnable to decrypt file. Please verify your password is correct.";
         }
     },
 
@@ -630,6 +635,7 @@ const App = {
             const text = buffer.byteLength > 0 ? await this.decrypt(new Uint8Array(buffer)) : "";
             this.state.baseContent = text;
             document.getElementById('editor').value = text;
+            // Use textContent to prevent XSS
             document.getElementById('active-filename').textContent = h.name;
             document.getElementById('save-status').textContent = "Loaded from disk";
             await this.renderList();
@@ -1043,6 +1049,7 @@ const App = {
                 const nameSpan = document.createElement('span');
                 nameSpan.style.overflow = 'hidden';
                 nameSpan.style.textOverflow = 'ellipsis';
+                // Use textContent instead of innerHTML to prevent XSS
                 nameSpan.textContent = h.name;
 
                 const removeBtn = document.createElement('span');
