@@ -171,8 +171,15 @@ const App = {
         lastDigestCheck: 0,
         isDirty: false,
         baseContent: null,
-        saveTimeout: null
+        saveTimeout: null,
+        // Event handlers storage for proper cleanup
+        fileListClickHandler: null,
+        fileListKeydownHandler: null,
+        editorInputHandler: null,
+        passInputKeypressHandler: null
     },
+
+    _toastTimer: null,
 
     async init() {
         try {
@@ -240,7 +247,16 @@ const App = {
     setupFileListHandlers() {
         const fileList = document.getElementById('file-list');
 
-        fileList.addEventListener('click', (e) => {
+        // Remove old handlers if they exist to prevent duplicate listeners
+        if (this.state.fileListClickHandler) {
+            fileList.removeEventListener('click', this.state.fileListClickHandler);
+        }
+        if (this.state.fileListKeydownHandler) {
+            fileList.removeEventListener('keydown', this.state.fileListKeydownHandler);
+        }
+
+        // Store handlers for later cleanup
+        this.state.fileListClickHandler = (e) => {
             const removeBtn = e.target.closest('.remove-btn');
             if (removeBtn) {
                 const name = removeBtn.closest('.file-item').getAttribute('data-filename');
@@ -253,9 +269,9 @@ const App = {
                 const req = tx.objectStore('handles').get(item.getAttribute('data-filename'));
                 req.onsuccess = () => { if (req.result) this.loadFile(req.result); };
             }
-        });
+        };
 
-        fileList.addEventListener('keydown', (e) => {
+        this.state.fileListKeydownHandler = (e) => {
             const item = e.target.closest('.file-item');
             if (!item || !this.state.db) return;
 
@@ -268,7 +284,24 @@ const App = {
                 e.preventDefault();
                 this.removeHandle(e, item.getAttribute('data-filename'));
             }
-        });
+        };
+
+        fileList.addEventListener('click', this.state.fileListClickHandler);
+        fileList.addEventListener('keydown', this.state.fileListKeydownHandler);
+    },
+
+    cleanupFileListHandlers() {
+        const fileList = document.getElementById('file-list');
+        if (!fileList) return;
+        
+        if (this.state.fileListClickHandler) {
+            fileList.removeEventListener('click', this.state.fileListClickHandler);
+            this.state.fileListClickHandler = null;
+        }
+        if (this.state.fileListKeydownHandler) {
+            fileList.removeEventListener('keydown', this.state.fileListKeydownHandler);
+            this.state.fileListKeydownHandler = null;
+        }
     },
 
     // --- INACTIVITY TIMER ---
@@ -376,14 +409,34 @@ const App = {
         this._toastTimer = null;
         this.inactivityManager.cleanup();
 
+        // Clean up event listeners to prevent memory leaks
+        this.cleanupFileListHandlers();
+        
+        // Remove editor input handler
+        const editor = document.getElementById('editor');
+        if (editor) {
+            editor.oninput = null;
+        }
+        
+        // Remove password input keypress handler
+        const passInput = document.getElementById('pass-input');
+        if (this.state.passInputKeypressHandler && passInput) {
+            passInput.removeEventListener('keypress', this.state.passInputKeypressHandler);
+            this.state.passInputKeypressHandler = null;
+        }
+
         // Clear sensitive data from memory before reload tears down JS heap.
         // JS strings are immutable so old values persist until GC; overwriting
         // DOM fields with random data encourages the engine to release them.
         const randomPad = crypto.getRandomValues(new Uint8Array(64)).toString();
-        document.getElementById('editor').value = randomPad;
-        document.getElementById('editor').value = '';
-        document.getElementById('pass-input').value = randomPad;
-        document.getElementById('pass-input').value = '';
+        if (editor) {
+            editor.value = randomPad;
+            editor.value = '';
+        }
+        if (passInput) {
+            passInput.value = randomPad;
+            passInput.value = '';
+        }
         this.state.key = null;
         this.state.sessionSalt = null;
         this.state.cachedCryptoKey = null;
@@ -1022,18 +1075,20 @@ const App = {
     }
 };
 
-// Auto-save on edit
-document.getElementById('editor').oninput = () => {
+// Setup editor input handler
+App.state.editorInputHandler = () => {
     App.state.isDirty = true;
     document.getElementById('save-status').textContent = "● Editing...";
     clearTimeout(App.state.saveTimeout);
     App.state.saveTimeout = setTimeout(() => App.save(), APP_CONFIG.AUTO_SAVE_DELAY_MS);
 };
+document.getElementById('editor').oninput = App.state.editorInputHandler;
 
-// Enter key on password input
-document.getElementById('pass-input').addEventListener('keypress', (e) => {
+// Setup password input keypress handler
+App.state.passInputKeypressHandler = (e) => {
     if (e.key === 'Enter') App.unlock();
-});
+};
+document.getElementById('pass-input').addEventListener('keypress', App.state.passInputKeypressHandler);
 
 // Set version display
 document.getElementById('app-version').textContent = `v${APP_CONFIG.VERSION}`;
