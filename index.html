@@ -397,6 +397,7 @@ const App = {
     // --- CRYPTO ENGINE ---
     async getCryptoKey(salt, iterations) {
         // Check if we can use the cached key (compare salt byte-by-byte)
+        // Note: This is a cache lookup, not authentication, so constant-time comparison is not required
         const canUseCachedKey = this.state.cachedCryptoKey && this.state.sessionSalt && salt && 
                                salt.length === this.state.sessionSalt.length &&
                                salt.every((byte, i) => byte === this.state.sessionSalt[i]);
@@ -415,7 +416,7 @@ const App = {
     },
 
     async encrypt(text) {
-        if (!this.state.sessionSalt) {
+        if (!this.state.sessionSalt || !this.state.cachedCryptoKey) {
             throw new Error('Session not initialized. Please unlock the session first.');
         }
         const iv = crypto.getRandomValues(new Uint8Array(APP_CONFIG.IV_LENGTH));
