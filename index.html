@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="theme-color" content="#1a73e8">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; upgrade-insecure-requests">
     <meta name="referrer" content="no-referrer">
     <title>SafeTXT</title>
     <link rel="manifest" href="manifest.json">
@@ -176,7 +176,11 @@ const App = {
         fileListClickHandler: null,
         fileListKeydownHandler: null,
         editorInputHandler: null,
-        passInputKeypressHandler: null
+        passInputKeypressHandler: null,
+        // Rate limiting for unlock attempts
+        unlockAttempts: 0,
+        unlockLastAttempt: 0,
+        unlockBlockedUntil: 0
     },
 
     _toastTimer: null,
@@ -375,15 +379,38 @@ const App = {
     async unlock() {
         const inputEl = document.getElementById('pass-input');
         const pass = inputEl.value;
-        if (!pass || pass.length < 12) {
-            alert("Password must be at least 12 characters for security.");
+        
+        // Rate limiting: prevent brute force attempts
+        const now = Date.now();
+        if (this.state.unlockBlockedUntil > now) {
+            const remainingSeconds = Math.ceil((this.state.unlockBlockedUntil - now) / 1000);
+            alert(`Too many failed attempts. Please wait ${remainingSeconds} seconds before trying again.`);
             return;
         }
+        
+        if (!pass || pass.length < 12) {
+            alert("Password must be at least 12 characters for security.");
+            this.state.unlockAttempts++;
+            this.state.unlockLastAttempt = now;
+            
+            // Block after 5 failed attempts
+            if (this.state.unlockAttempts >= 5) {
+                this.state.unlockBlockedUntil = now + 30000; // 30 seconds
+                this.state.unlockAttempts = 0;
+            }
+            return;
+        }
+        
         try {
             this.state.key = pass;
             // Generate session salt and derive key once for caching
             this.state.sessionSalt = crypto.getRandomValues(new Uint8Array(APP_CONFIG.SALT_LENGTH));
             this.state.cachedCryptoKey = await this.getCryptoKey(this.state.sessionSalt, APP_CONFIG.PBKDF2_ITERATIONS);
+            
+            // Reset rate limiting on successful unlock
+            this.state.unlockAttempts = 0;
+            this.state.unlockBlockedUntil = 0;
+            
             inputEl.value = "";
             document.getElementById('unlock-overlay').classList.add('hidden');
             document.getElementById('app-shell').classList.remove('blur');
@@ -397,6 +424,15 @@ const App = {
             this.state.key = null;
             this.state.sessionSalt = null;
             this.state.cachedCryptoKey = null;
+            
+            this.state.unlockAttempts++;
+            this.state.unlockLastAttempt = now;
+            
+            // Block after 5 failed attempts
+            if (this.state.unlockAttempts >= 5) {
+                this.state.unlockBlockedUntil = now + 30000; // 30 seconds
+                this.state.unlockAttempts = 0;
+            }
         }
     },
 
