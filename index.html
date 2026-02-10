@@ -372,6 +372,8 @@ const App = {
         clearTimeout(this.state.saveTimeout);
         clearInterval(this.state.pollIntervalId);
         this.state.pollIntervalId = null;
+        clearTimeout(this._toastTimer);
+        this._toastTimer = null;
         this.inactivityManager.cleanup();
 
         // Clear sensitive data from memory before reload tears down JS heap.
@@ -474,8 +476,10 @@ const App = {
             const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, ciphertext);
             return new TextDecoder().decode(plain);
         } catch (e) {
-            if (e.name === 'OperationError') return "### DECRYPTION ERROR ###\nIncorrect password or corrupted file.";
-            return `### DECRYPTION ERROR ###\n${e.message}`;
+            if (e.name === 'OperationError') {
+                return "### DECRYPTION ERROR ###\nIncorrect password or corrupted file.\n\nPossible causes:\n1. Wrong password\n2. File has been corrupted\n3. File was encrypted with a different key";
+            }
+            return `### DECRYPTION ERROR ###\n${e.message || 'Unknown error during decryption'}`;
         }
     },
 
@@ -578,7 +582,9 @@ const App = {
             await this.renderList();
             await this.setupFileObserver(h);
         } catch (e) {
+            console.error('Error loading file:', e);
             document.getElementById('save-status').textContent = "⚠️ Error loading file";
+            alert(`Failed to load file: ${e.message || 'Unknown error'}`);
         }
     },
 
@@ -600,7 +606,9 @@ const App = {
             this.state.baseContent = document.getElementById('editor').value;
             document.getElementById('save-status').textContent = "✓ Encrypted & Saved";
         } catch (e) {
+            console.error('Error saving file:', e);
             document.getElementById('save-status').textContent = "⚠️ Error Saving";
+            alert(`Failed to save file: ${e.message || 'Unknown error'}`);
         }
     },
 
@@ -923,7 +931,10 @@ const App = {
                 this.showToast('Merge failed — local edits backed up, loaded remote version');
                 document.getElementById('save-status').textContent = '⚠️ Fallback to remote';
             }
-        } catch (e) { /* polling failure — silent */ }
+        } catch (e) {
+            // Log polling failures for debugging, but don't alert user
+            console.warn('Polling error:', e);
+        }
         finally { this.state.pollInProgress = false; }
     },
 
