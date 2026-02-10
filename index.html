@@ -150,6 +150,7 @@ const APP_CONFIG = {
     DIGEST_THROTTLE_MS: 15000, // throttle digest hashing to reduce shared-drive I/O
     AUTO_SAVE_DELAY_MS: 1000,
     INACTIVITY_TIMEOUT_MS: 10 * 60 * 1000,
+    MAX_FILE_SIZE_MB: 100, // Maximum file size in megabytes
     DB_NAME: 'LocalNote_v2026', // preserve original name so existing users keep their file handles
     DB_VERSION: 1
 };
@@ -164,6 +165,7 @@ const App = {
         fileObserver: null,
         fileObserverTimeout: null,
         pollInProgress: false,
+        pollIntervalId: null,
         lastMTime: 0,
         lastDigest: null,
         lastDigestCheck: 0,
@@ -195,7 +197,7 @@ const App = {
     },
 
     setupPolling() {
-        setInterval(() => this.pollDisk(), APP_CONFIG.POLL_INTERVAL_MS);
+        this.state.pollIntervalId = setInterval(() => this.pollDisk(), APP_CONFIG.POLL_INTERVAL_MS);
     },
 
     teardownFileObserver() {
@@ -229,7 +231,9 @@ const App = {
 
     setupServiceWorker() {
         if ('serviceWorker' in navigator) {
-            navigator.serviceWorker.register('./sw.js').catch(() => {});
+            navigator.serviceWorker.register('./sw.js')
+                .then(() => console.log('Service Worker registered successfully'))
+                .catch((error) => console.warn('Service Worker registration failed:', error));
         }
     },
 
@@ -274,10 +278,14 @@ const App = {
         inactivityTimer: null,
         warningTimer: null,
         warningCountdown: null,
+        eventListeners: [],
 
         init() {
-            ['mousedown', 'mousemove', 'keypress', 'scroll', 'touchstart', 'click'].forEach(evt => {
-                document.addEventListener(evt, () => this.resetTimer(), true);
+            const events = ['mousedown', 'mousemove', 'keypress', 'scroll', 'touchstart', 'click'];
+            const handler = () => this.resetTimer();
+            events.forEach(evt => {
+                document.addEventListener(evt, handler, true);
+                this.eventListeners.push({ event: evt, handler });
             });
             this.resetTimer();
         },
@@ -322,6 +330,11 @@ const App = {
             clearTimeout(this.warningTimer);
             clearInterval(this.warningCountdown);
             this.hideWarning();
+            // Remove event listeners to prevent memory leak
+            this.eventListeners.forEach(({ event, handler }) => {
+                document.removeEventListener(event, handler, true);
+            });
+            this.eventListeners = [];
         }
     },
 
@@ -357,6 +370,8 @@ const App = {
     async lock(force = false) {
         if (!force && !confirm("Lock session? You will need to re-enter your key to view notes.")) return;
         clearTimeout(this.state.saveTimeout);
+        clearInterval(this.state.pollIntervalId);
+        this.state.pollIntervalId = null;
         this.inactivityManager.cleanup();
 
         // Clear sensitive data from memory before reload tears down JS heap.
@@ -381,9 +396,13 @@ const App = {
 
         if (this.state.db) { this.state.db.close(); this.state.db = null; }
 
-        // Instruct service worker to purge cached app content
-        if (navigator.serviceWorker && navigator.serviceWorker.controller) {
-            navigator.serviceWorker.controller.postMessage({ type: 'CLEAR_CACHE' });
+        // Instruct service worker to purge cached app content with timeout
+        try {
+            if (navigator.serviceWorker && navigator.serviceWorker.controller) {
+                navigator.serviceWorker.controller.postMessage({ type: 'CLEAR_CACHE' });
+            }
+        } catch (e) {
+            console.warn('Failed to send clear cache message to service worker:', e);
         }
 
         location.reload();
@@ -504,6 +523,10 @@ const App = {
     },
 
     async persistHandle(h) {
+        if (!this.state.db) {
+            console.error('Database not initialized');
+            return;
+        }
         const tx = this.state.db.transaction('handles', 'readwrite');
         await tx.objectStore('handles').put(h, h.name);
         await this.renderList();
@@ -528,6 +551,15 @@ const App = {
             }
 
             const file = await h.getFile();
+            
+            // Check file size to prevent OOM
+            const maxSizeBytes = APP_CONFIG.MAX_FILE_SIZE_MB * 1024 * 1024;
+            if (file.size > maxSizeBytes) {
+                document.getElementById('save-status').textContent = `⚠️ File too large (max ${APP_CONFIG.MAX_FILE_SIZE_MB}MB)`;
+                alert(`File is too large (${(file.size / 1024 / 1024).toFixed(1)}MB). Maximum supported size is ${APP_CONFIG.MAX_FILE_SIZE_MB}MB.`);
+                return;
+            }
+            
             const buffer = await file.arrayBuffer();
             const digest = await this.computeDigest(buffer);
 
@@ -541,7 +573,7 @@ const App = {
             const text = buffer.byteLength > 0 ? await this.decrypt(new Uint8Array(buffer)) : "";
             this.state.baseContent = text;
             document.getElementById('editor').value = text;
-            document.getElementById('active-filename').textContent = h.name;
+            document.getElementById('active-filename').textContent = h.name; // Using textContent prevents XSS
             document.getElementById('save-status').textContent = "Loaded from disk";
             await this.renderList();
             await this.setupFileObserver(h);
@@ -776,6 +808,14 @@ const App = {
             const shouldThrottle = hasDigest && now - this.state.lastDigestCheck < APP_CONFIG.DIGEST_THROTTLE_MS;
 
             const file = await this.state.currentHandle.getFile();
+            
+            // Check file size to prevent OOM
+            const maxSizeBytes = APP_CONFIG.MAX_FILE_SIZE_MB * 1024 * 1024;
+            if (file.size > maxSizeBytes) {
+                document.getElementById('save-status').textContent = `⚠️ File too large (max ${APP_CONFIG.MAX_FILE_SIZE_MB}MB)`;
+                return;
+            }
+            
             const mtimeNewer = file.lastModified > this.state.lastMTime;
             // Skip disk hashing when throttled, no local edits, and mtime unchanged.
             if (!this.state.isDirty && !mtimeNewer && shouldThrottle) return;
@@ -811,7 +851,7 @@ const App = {
 
             // If no base snapshot exists, we can't do a three-way merge.
             // Fall back: keep remote, store local as backup.
-            if (baseText == null) {
+            if (baseText === null || baseText === undefined) {
                 await this._storeBackup(this.state.currentHandle.name, localText);
                 document.getElementById('editor').value = remoteText;
                 this.state.baseContent = remoteText;
@@ -890,6 +930,10 @@ const App = {
     // --- SIDEBAR UI ---
     async removeHandle(e, name) {
         e.stopPropagation();
+        if (!this.state.db) {
+            console.error('Database not initialized');
+            return;
+        }
         if (confirm(`Remove shortcut for "${name}"? The file remains on your disk.`)) {
             const tx = this.state.db.transaction('handles', 'readwrite');
             await tx.objectStore('handles').delete(name);
