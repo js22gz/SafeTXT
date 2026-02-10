@@ -577,7 +577,7 @@ const App = {
             const text = buffer.byteLength > 0 ? await this.decrypt(new Uint8Array(buffer)) : "";
             this.state.baseContent = text;
             document.getElementById('editor').value = text;
-            document.getElementById('active-filename').textContent = h.name; // Using textContent prevents XSS
+            document.getElementById('active-filename').textContent = h.name;
             document.getElementById('save-status').textContent = "Loaded from disk";
             await this.renderList();
             await this.setupFileObserver(h);
@@ -859,7 +859,7 @@ const App = {
 
             // If no base snapshot exists, we can't do a three-way merge.
             // Fall back: keep remote, store local as backup.
-            if (baseText === null || baseText === undefined) {
+            if (baseText == null) {
                 await this._storeBackup(this.state.currentHandle.name, localText);
                 document.getElementById('editor').value = remoteText;
                 this.state.baseContent = remoteText;
