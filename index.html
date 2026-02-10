@@ -292,6 +292,8 @@ const App = {
 
     cleanupFileListHandlers() {
         const fileList = document.getElementById('file-list');
+        if (!fileList) return;
+        
         if (this.state.fileListClickHandler) {
             fileList.removeEventListener('click', this.state.fileListClickHandler);
             this.state.fileListClickHandler = null;
