@@ -390,14 +390,10 @@ const App = {
     async getCryptoKey(salt, iterations) {
         // Check if we can use the cached key (compare salt byte-by-byte)
         if (this.state.cachedCryptoKey && this.state.sessionSalt && salt && salt.length === this.state.sessionSalt.length) {
-            let match = true;
-            for (let i = 0; i < salt.length; i++) {
-                if (salt[i] !== this.state.sessionSalt[i]) {
-                    match = false;
-                    break;
-                }
+            // Use Array.prototype.every for efficient comparison
+            if (salt.every((byte, i) => byte === this.state.sessionSalt[i])) {
+                return this.state.cachedCryptoKey;
             }
-            if (match) return this.state.cachedCryptoKey;
         }
         
         const enc = new TextEncoder();
