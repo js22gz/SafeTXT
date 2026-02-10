@@ -158,6 +158,8 @@ const App = {
     state: {
         db: null,
         key: null,
+        sessionSalt: null,
+        cachedCryptoKey: null,
         currentHandle: null,
         fileObserver: null,
         fileObserverTimeout: null,
@@ -324,21 +326,32 @@ const App = {
     },
 
     // --- SESSION CONTROL ---
-    unlock() {
+    async unlock() {
         const inputEl = document.getElementById('pass-input');
         const pass = inputEl.value;
         if (!pass || pass.length < 12) {
             alert("Password must be at least 12 characters for security.");
             return;
         }
-        this.state.key = pass;
-        inputEl.value = "";
-        document.getElementById('unlock-overlay').classList.add('hidden');
-        document.getElementById('app-shell').classList.remove('blur');
-        document.getElementById('editor').disabled = false;
-        document.getElementById('save-status').textContent = "Session Active";
-        this.updateSaveButtonLabel();
-        this.inactivityManager.init();
+        try {
+            this.state.key = pass;
+            // Generate session salt and derive key once for caching
+            this.state.sessionSalt = crypto.getRandomValues(new Uint8Array(APP_CONFIG.SALT_LENGTH));
+            this.state.cachedCryptoKey = await this.getCryptoKey(this.state.sessionSalt, APP_CONFIG.PBKDF2_ITERATIONS);
+            inputEl.value = "";
+            document.getElementById('unlock-overlay').classList.add('hidden');
+            document.getElementById('app-shell').classList.remove('blur');
+            document.getElementById('editor').disabled = false;
+            document.getElementById('save-status').textContent = "Session Active";
+            this.updateSaveButtonLabel();
+            this.inactivityManager.init();
+        } catch (e) {
+            console.error('Unlock failed:', e);
+            alert('Failed to initialize session. Please try again.');
+            this.state.key = null;
+            this.state.sessionSalt = null;
+            this.state.cachedCryptoKey = null;
+        }
     },
 
     async lock(force = false) {
@@ -355,6 +368,8 @@ const App = {
         document.getElementById('pass-input').value = randomPad;
         document.getElementById('pass-input').value = '';
         this.state.key = null;
+        this.state.sessionSalt = null;
+        this.state.cachedCryptoKey = null;
         this.state.currentHandle = null;
         this.updateSaveButtonLabel();
         this.teardownFileObserver();
@@ -381,6 +396,16 @@ const App = {
 
     // --- CRYPTO ENGINE ---
     async getCryptoKey(salt, iterations) {
+        // Check if we can use the cached key (compare salt byte-by-byte)
+        // Note: This is a cache lookup, not authentication, so constant-time comparison is not required
+        const canUseCachedKey = this.state.cachedCryptoKey && this.state.sessionSalt && salt && 
+                               salt.length === this.state.sessionSalt.length &&
+                               salt.every((byte, i) => byte === this.state.sessionSalt[i]);
+        
+        if (canUseCachedKey) {
+            return this.state.cachedCryptoKey;
+        }
+        
         const enc = new TextEncoder();
         const baseKey = await crypto.subtle.importKey("raw", enc.encode(this.state.key), "PBKDF2", false, ["deriveKey"]);
         // Legacy salt value must be preserved for backwards compatibility with existing encrypted files
@@ -391,8 +416,12 @@ const App = {
     },
 
     async encrypt(text) {
+        if (!this.state.sessionSalt || !this.state.cachedCryptoKey) {
+            throw new Error('Session not initialized. Please unlock the session first.');
+        }
         const iv = crypto.getRandomValues(new Uint8Array(APP_CONFIG.IV_LENGTH));
-        const salt = crypto.getRandomValues(new Uint8Array(APP_CONFIG.SALT_LENGTH));
+        // Use session salt and cached key for performance
+        const salt = this.state.sessionSalt;
         const key = await this.getCryptoKey(salt, APP_CONFIG.PBKDF2_ITERATIONS);
         const cipher = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, new TextEncoder().encode(text));
 
