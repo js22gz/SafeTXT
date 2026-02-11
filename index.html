@@ -228,7 +228,7 @@ state: {
         } catch (e) {
             this.teardownFileObserver();
             const reason = e?.name || 'unknown';
-            console.warn(`FileSystemObserver setup failed (${reason}).`, e);
+            console.warn(`FileSystemObserver setup failed (${reason}); automatic file sync unavailable.`, e);
         }
     },
 
