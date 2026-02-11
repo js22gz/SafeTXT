@@ -160,32 +160,28 @@ const APP_CONFIG = {
 };
 
 const App = {
-    state: {
-        db: null,
-        key: null,
-        sessionSalt: null,
-        cachedCryptoKey: null,
-        currentHandle: null,
-        fileObserver: null,
-        fileObserverTimeout: null,
-        pollInProgress: false,
-        pollIntervalId: null,
-        lastMTime: 0,
-        lastDigest: null,
-        lastDigestCheck: 0,
-        isDirty: false,
-        baseContent: null,
-        saveTimeout: null,
-        // Event handlers storage for proper cleanup
-        fileListClickHandler: null,
-        fileListKeydownHandler: null,
-        editorInputHandler: null,
-        passInputKeypressHandler: null,
-        // Rate limiting for unlock attempts
-        unlockAttempts: 0,
-        unlockLastAttempt: 0,
-        unlockBlockedUntil: 0
-    },
+state: {
+    db: null,
+    key: null,
+    sessionSalt: null,
+    cachedCryptoKey: null,
+    currentHandle: null,
+    fileObserver: null,
+    fileObserverTimeout: null,
+    pollInProgress: false,
+    pollIntervalId: null,
+    lastMTime: 0,
+    lastDigest: null,
+    lastDigestCheck: 0,
+    isDirty: false,
+    baseContent: null,
+    saveTimeout: null,
+    // Event handlers storage for proper cleanup
+    fileListClickHandler: null,
+    fileListKeydownHandler: null,
+    editorInputHandler: null,
+    passInputKeypressHandler: null
+},
 
     _toastTimer: null,
 
@@ -380,58 +376,36 @@ const App = {
     },
 
     // --- SESSION CONTROL ---
-    async unlock() {
-        const inputEl = document.getElementById('pass-input');
-        const pass = inputEl.value;
+async unlock() {
+    const inputEl = document.getElementById('pass-input');
+    const pass = inputEl.value;
+    
+    if (!pass || pass.length < 12) {
+        alert("Password must be at least 12 characters for security.");
+        return;
+    }
+    
+    try {
+        this.state.key = pass;
+        // Generate session salt and derive key once for caching
+        this.state.sessionSalt = crypto.getRandomValues(new Uint8Array(APP_CONFIG.SALT_LENGTH));
+        this.state.cachedCryptoKey = await this.getCryptoKey(this.state.sessionSalt, APP_CONFIG.PBKDF2_ITERATIONS);
         
-        // Rate limiting: prevent brute force attempts
-        const now = Date.now();
-        if (this.state.unlockBlockedUntil > now) {
-            const remainingSeconds = Math.ceil((this.state.unlockBlockedUntil - now) / 1000);
-            alert(`Too many failed attempts. Please wait ${remainingSeconds} seconds before trying again.`);
-            return;
-        }
-        
-        if (!pass || pass.length < 12) {
-            alert("Password must be at least 12 characters for security.");
-            return;
-        }
-        
-        try {
-            this.state.key = pass;
-            // Generate session salt and derive key once for caching
-            this.state.sessionSalt = crypto.getRandomValues(new Uint8Array(APP_CONFIG.SALT_LENGTH));
-            this.state.cachedCryptoKey = await this.getCryptoKey(this.state.sessionSalt, APP_CONFIG.PBKDF2_ITERATIONS);
-            
-            // Reset rate limiting on successful unlock
-            this.state.unlockAttempts = 0;
-            this.state.unlockBlockedUntil = 0;
-            
-            inputEl.value = "";
-            document.getElementById('unlock-overlay').classList.add('hidden');
-            document.getElementById('app-shell').classList.remove('blur');
-            document.getElementById('editor').disabled = false;
-            document.getElementById('save-status').textContent = "Session Active";
-            this.updateSaveButtonLabel();
-            this.inactivityManager.init();
-        } catch (e) {
-            console.error('Unlock failed:', e);
-            alert('Failed to initialize session. Please try again.');
-            this.state.key = null;
-            this.state.sessionSalt = null;
-            this.state.cachedCryptoKey = null;
-            
-            // Increment failed attempts and apply lockout if needed
-            this.state.unlockAttempts++;
-            this.state.unlockLastAttempt = now;
-            
-            if (this.state.unlockAttempts >= APP_CONFIG.UNLOCK_MAX_ATTEMPTS) {
-                this.state.unlockBlockedUntil = now + APP_CONFIG.UNLOCK_LOCKOUT_DURATION_MS;
-                this.state.unlockAttempts = 0;
-            }
-        }
-    },
-
+        inputEl.value = "";
+        document.getElementById('unlock-overlay').classList.add('hidden');
+        document.getElementById('app-shell').classList.remove('blur');
+        document.getElementById('editor').disabled = false;
+        document.getElementById('save-status').textContent = "Session Active";
+        this.updateSaveButtonLabel();
+        this.inactivityManager.init();
+    } catch (e) {
+        console.error('Unlock failed:', e);
+        alert('Failed to initialize session. Please try again.');
+        this.state.key = null;
+        this.state.sessionSalt = null;
+        this.state.cachedCryptoKey = null;
+    }
+},
     async lock(force = false) {
         if (!force && !confirm("Lock session? You will need to re-enter your key to view notes.")) return;
         clearTimeout(this.state.saveTimeout);
@@ -544,32 +518,24 @@ const App = {
         return blob;
     },
 
-    async decrypt(buffer) {
-        try {
-            if (!buffer || buffer.length < 29) throw new Error('Invalid file format');
-
-            let salt, iv, ciphertext, iterations;
-
-            if (buffer[0] === APP_CONFIG.FILE_FORMAT_VERSION) {
-                salt = buffer.slice(1, 1 + APP_CONFIG.SALT_LENGTH);
-                iv = buffer.slice(1 + APP_CONFIG.SALT_LENGTH, 1 + APP_CONFIG.SALT_LENGTH + APP_CONFIG.IV_LENGTH);
-                ciphertext = buffer.slice(1 + APP_CONFIG.SALT_LENGTH + APP_CONFIG.IV_LENGTH);
-                iterations = APP_CONFIG.PBKDF2_ITERATIONS;
-            } else {
-                salt = null;
-                iv = buffer.slice(0, 12);
-                ciphertext = buffer.slice(12);
-                iterations = 100000;
-            }
-
-            const key = await this.getCryptoKey(salt, iterations);
-            const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, ciphertext);
-            return new TextDecoder().decode(plain);
-        } catch (e) {
-            // Generic error message to avoid information disclosure
-            return "### DECRYPTION ERROR ###\nUnable to decrypt file. Please verify your password is correct.";
-        }
-    },
+async decrypt(buffer) {
+    try {
+        if (!buffer || buffer.length < 29) throw new Error('Invalid file format');
+        if (buffer[0] !== APP_CONFIG.FILE_FORMAT_VERSION) throw new Error('Unsupported file format version');
+        
+        const salt = buffer.slice(1, 1 + APP_CONFIG.SALT_LENGTH);
+        const iv = buffer.slice(1 + APP_CONFIG.SALT_LENGTH, 1 + APP_CONFIG.SALT_LENGTH + APP_CONFIG.IV_LENGTH);
+        const ciphertext = buffer.slice(1 + APP_CONFIG.SALT_LENGTH + APP_CONFIG.IV_LENGTH);
+        const iterations = APP_CONFIG.PBKDF2_ITERATIONS;
+        
+        const key = await this.getCryptoKey(salt, iterations);
+        const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, ciphertext);
+        return new TextDecoder().decode(plain);
+    } catch (e) {
+        // Generic error message to avoid information disclosure
+        return "### DECRYPTION ERROR ###\nUnable to decrypt file. Please verify your password is correct.";
+    }
+},
 
     async computeDigest(buffer) {
         const hash = await crypto.subtle.digest('SHA-256', buffer);
