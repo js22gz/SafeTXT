@@ -180,6 +180,17 @@ state: {
 
     _toastTimer: null,
 
+    _wipeBytes(arr) {
+        if (arr instanceof Uint8Array) arr.fill(0);
+    },
+
+    _setBaseContent(bytes) {
+        if (this.state.baseContent instanceof Uint8Array && this.state.baseContent !== bytes) {
+            this.state.baseContent.fill(0);
+        }
+        this.state.baseContent = bytes;
+    },
+
     async init() {
         this.setupEditorHandler();
         this.setupPassInputHandler();
@@ -399,12 +410,15 @@ async unlock() {
         return;
     }
     
+    // Encode password to Uint8Array so we can wipe it after use
+    const passBytes = new TextEncoder().encode(pass);
+    
     try {
-        const enc = new TextEncoder();
         this.state.key = await crypto.subtle.importKey(
-            "raw", enc.encode(pass), "PBKDF2", false, ["deriveKey"]
+            "raw", passBytes, "PBKDF2", false, ["deriveKey"]
         );
         
+        passBytes.fill(0);
         inputEl.value = "";
         document.getElementById('unlock-overlay').classList.add('hidden');
         document.getElementById('app-shell').classList.remove('blur');
@@ -413,6 +427,7 @@ async unlock() {
         this.updateSaveButtonLabel();
         this.inactivityManager.init();
     } catch (e) {
+        passBytes.fill(0);
         console.error('Unlock failed:', e);
         alert('Failed to initialize session. Please try again.');
         this.state.key = null;
@@ -443,20 +458,17 @@ async unlock() {
         }
 
         // Clear sensitive data from memory before reload.
-        // Note: Due to string immutability in JS, original values persist in memory
-        // until GC. This is a best-effort approach to minimize exposure.
-        const randomBytes = crypto.getRandomValues(new Uint8Array(128));
-        // Create random string with base64 encoding (max 256 chars to limit memory usage)
-        const randomStr = btoa(String.fromCharCode(...randomBytes)).substring(0, 256);
-        
+        // Uint8Array buffers are mutable and can be wiped in-place,
+        // unlike JS strings which are immutable and persist until GC.
         if (editor) {
-            editor.value = randomStr;
             editor.value = '';
         }
         if (passInput) {
-            passInput.value = randomStr;
             passInput.value = '';
         }
+        
+        // Wipe baseContent Uint8Array in-place before releasing
+        this._setBaseContent(null);
         
         // Clear key reference (CryptoKey is opaque and not inspectable)
         this.state.key = null;
@@ -464,7 +476,6 @@ async unlock() {
         this.updateSaveButtonLabel();
         this.teardownFileObserver();
         this.state.isDirty = false;
-        this.state.baseContent = null;
         this.state.lastMTime = 0;
         this.state.lastDigest = null;
         this.state.lastDigestCheck = 0;
@@ -507,7 +518,7 @@ async unlock() {
         );
     },
         
-async encrypt(text) {
+async encrypt(plainBytes) {
         if (!this.state.key) throw new Error('Unlock session first.');
 
         // Always generate a fresh random salt per encryption operation
@@ -523,11 +534,10 @@ async encrypt(text) {
         metadata.set(iv, 1 + salt.length);
         
         // Encrypt with additionalData to authenticate the file header
-        const encodedText = new TextEncoder().encode(text);
         const cipher = await crypto.subtle.encrypt(
             { name: "AES-GCM", iv, additionalData: metadata }, 
             fileKey, 
-            encodedText
+            plainBytes
         );
 
         // Pack the binary: [Version][Salt][IV][Cipher]
@@ -552,7 +562,7 @@ async encrypt(text) {
             });
 
             if (this.state.key) {
-                const blob = await this.encrypt('');
+                const blob = await this.encrypt(new Uint8Array(0));
                 const stream = await h.createWritable();
                 await stream.write(blob);
                 await stream.close();
@@ -639,19 +649,18 @@ async encrypt(text) {
             this.state.isDirty = false;
                         
             const result = await this.getDecryptedText(new Uint8Array(buffer));
-            const text = result.text;
             const editor = document.getElementById('editor');
             if (result.success) {
               this.state.decryptionFailed = false;
               editor.disabled = false;
-              editor.value = text;
-              this.state.baseContent = text;
+              editor.value = new TextDecoder().decode(result.plainBytes);
+              this._setBaseContent(result.plainBytes);
               document.getElementById('save-status').textContent = "Loaded from disk";
             } else {
               this.state.decryptionFailed = true;
-              editor.value = text;
+              editor.value = result.errorMessage;
               editor.disabled = true;
-              this.state.baseContent = null;
+              this._setBaseContent(null);
               document.getElementById('save-status').textContent = "⚠️ Decryption failed — editing disabled";
             }
             // Use textContent to prevent XSS
@@ -673,7 +682,8 @@ async save() {
         clearTimeout(this.state._saveUnlockTimeout);
         this.state.syncInProgress = true; 
 
-        const encryptedBytes = await this.encrypt(document.getElementById('editor').value);
+        const plainBytes = new TextEncoder().encode(document.getElementById('editor').value);
+        const encryptedBytes = await this.encrypt(plainBytes);
         const stream = await this.state.currentHandle.createWritable();
         await stream.write(encryptedBytes);
         await stream.close();
@@ -685,7 +695,7 @@ async save() {
         this.state.lastDigest = digest;
         this.state.lastDigestCheck = Date.now();
         this.state.isDirty = false;
-        this.state.baseContent = document.getElementById('editor').value;
+        this._setBaseContent(plainBytes);
         
         document.getElementById('save-status').textContent = "✓ Encrypted & Saved";
     } catch (e) {
@@ -946,11 +956,12 @@ async save() {
 
             clearTimeout(this.state.saveTimeout);
             const result = await this.getDecryptedText(new Uint8Array(buffer));
-            const remoteText = result.text;
+            if (!result.success) return;
+            const remoteBytes = result.plainBytes;
             // If user hasn't edited locally, just reload silently
             if (!this.state.isDirty) {
-                document.getElementById('editor').value = remoteText;
-                this.state.baseContent = remoteText;
+                document.getElementById('editor').value = new TextDecoder().decode(remoteBytes);
+                this._setBaseContent(remoteBytes);
                 this._updateSyncMetadata(file, digest, now);
                 this.state.isDirty = false;
                 document.getElementById('save-status').textContent = 'Synced from disk';
@@ -959,14 +970,14 @@ async save() {
 
             // User has local edits — attempt three-way merge
             const localText = document.getElementById('editor').value;
-            const baseText = this.state.baseContent;
+            const baseBytes = this.state.baseContent;
 
             // If no base snapshot exists, we can't do a three-way merge.
             // Fall back: keep remote, store local as backup.
-            if (baseText == null) {
+            if (baseBytes == null) {
                 await this._storeBackup(this.state.currentHandle.name, localText);
-                document.getElementById('editor').value = remoteText;
-                this.state.baseContent = remoteText;
+                document.getElementById('editor').value = new TextDecoder().decode(remoteBytes);
+                this._setBaseContent(remoteBytes);
                 this._updateSyncMetadata(file, digest, now);
                 this.state.isDirty = false;
                 this.showToast('Remote updated — local edits backed up');
@@ -975,26 +986,30 @@ async save() {
             }
 
             // If base matches remote, nothing new from remote
-            if (baseText === remoteText) {
+            if (arraysEqual(baseBytes, remoteBytes)) {
+                this._wipeBytes(remoteBytes);
                 this._updateSyncMetadata(file, digest, now);
                 return;
             }
             // If base matches local, local had no real change
-            if (baseText === localText) {
-                document.getElementById('editor').value = remoteText;
-                this.state.baseContent = remoteText;
+            const localBytes = new TextEncoder().encode(localText);
+            if (arraysEqual(baseBytes, localBytes)) {
+                localBytes.fill(0);
+                document.getElementById('editor').value = new TextDecoder().decode(remoteBytes);
+                this._setBaseContent(remoteBytes);
                 this._updateSyncMetadata(file, digest, now);
                 this.state.isDirty = false;
                 document.getElementById('save-status').textContent = 'Synced from disk';
                 return;
             }
+            localBytes.fill(0);
 
             // Both local and remote have changes relative to base.
             // Conservative approach: don't attempt automatic merge (diff3Merge is unreliable).
             // Store local edits as backup and load the remote version.
             await this._storeBackup(this.state.currentHandle.name, localText);
-            document.getElementById('editor').value = remoteText;
-            this.state.baseContent = remoteText;
+            document.getElementById('editor').value = new TextDecoder().decode(remoteBytes);
+            this._setBaseContent(remoteBytes);
             this._updateSyncMetadata(file, digest, now);
             this.state.isDirty = false;
             this.showToast('⚠️ Conflict detected — local edits backed up, loaded remote version');
@@ -1097,13 +1112,13 @@ async save() {
 
     async getDecryptedText(buffer) {
         if (buffer.byteLength === 0) {
-            return {text: '', success: true};
+            return {plainBytes: new Uint8Array(0), success: true};
         }
         if (buffer.byteLength < 1 + APP_CONFIG.SALT_LENGTH + APP_CONFIG.IV_LENGTH) {
-            return {text: '### DECRYPTION ERROR ###\nInvalid file format.', success: false};
+            return {errorMessage: '### DECRYPTION ERROR ###\nInvalid file format.', success: false};
         }
         if (buffer[0] !== APP_CONFIG.FILE_FORMAT_VERSION) {
-            return {text: '### DECRYPTION ERROR ###\nUnsupported file format version.', success: false};
+            return {errorMessage: '### DECRYPTION ERROR ###\nUnsupported file format version.', success: false};
         }
         const salt = buffer.slice(1, 1 + APP_CONFIG.SALT_LENGTH);
         const saltArray = new Uint8Array(salt);
@@ -1111,7 +1126,7 @@ async save() {
         try {
             key = await this.deriveKeyFromSalt(saltArray);
         } catch (e) {
-            return {text: '### DECRYPTION ERROR ###\nFailed to derive key.', success: false};
+            return {errorMessage: '### DECRYPTION ERROR ###\nFailed to derive key.', success: false};
         }
         const iv = buffer.slice(1 + APP_CONFIG.SALT_LENGTH, 1 + APP_CONFIG.SALT_LENGTH + APP_CONFIG.IV_LENGTH);
         const ciphertext = buffer.slice(1 + APP_CONFIG.SALT_LENGTH + APP_CONFIG.IV_LENGTH);
@@ -1121,10 +1136,9 @@ async save() {
 
         try {
             const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv, additionalData: metadata }, key, ciphertext);
-            const text = new TextDecoder().decode(plain);
-            return {text, success: true};
+            return {plainBytes: new Uint8Array(plain), success: true};
         } catch (e) {
-            return {text: '### DECRYPTION ERROR ###\nUnable to decrypt file. Please verify your password is correct.', success: false};
+            return {errorMessage: '### DECRYPTION ERROR ###\nUnable to decrypt file. Please verify your password is correct.', success: false};
         }
     }
 };
