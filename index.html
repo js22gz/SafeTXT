@@ -568,8 +568,7 @@ async encrypt(text) {
         } catch (e) {
             throw new Error("Decryption failed. Wrong key or corrupted file.");
         }
-    }
-};
+    },
 
     async computeDigest(buffer) {
         const hash = await crypto.subtle.digest('SHA-256', buffer);
