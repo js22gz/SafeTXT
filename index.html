@@ -181,6 +181,9 @@ state: {
     _toastTimer: null,
 
     async init() {
+        this.setupEditorHandler();
+        this.setupPassInputHandler();
+
         try {
             this.state.db = await new Promise((resolve, reject) => {
                 const req = indexedDB.open(APP_CONFIG.DB_NAME, APP_CONFIG.DB_VERSION);
@@ -199,6 +202,24 @@ state: {
             console.error('Init failed:', e);
             this.state.db = null;
         }
+    },
+
+    setupEditorHandler() {
+        this.state.editorInputHandler = () => {
+            if (this.state.decryptionFailed) return;
+            this.state.isDirty = true;
+            document.getElementById('save-status').textContent = "● Editing...";
+            clearTimeout(this.state.saveTimeout);
+            this.state.saveTimeout = setTimeout(() => this.save(), APP_CONFIG.AUTO_SAVE_DELAY_MS);
+        };
+        document.getElementById('editor').oninput = this.state.editorInputHandler;
+    },
+
+    setupPassInputHandler() {
+        this.state.passInputKeypressHandler = (e) => {
+            if (e.key === 'Enter') this.unlock();
+        };
+        document.getElementById('pass-input').addEventListener('keypress', this.state.passInputKeypressHandler);
     },
 
     teardownFileObserver() {
@@ -470,23 +491,14 @@ async unlock() {
     },
 
     // --- CRYPTO ENGINE ---
-async getCryptoKey(salt, iterations) {
-  if (!salt) throw new Error('Salt is required for key derivation.');
-  return crypto.subtle.deriveKey(
-    { name: "PBKDF2", salt, iterations: iterations || APP_CONFIG.PBKDF2_ITERATIONS, hash: "SHA-256" },
-    this.state.key, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]
-  );
-},
-    /**
-     * Helper: Derive a specific AES-GCM key using the master password and a file-specific salt.
-     */
     async deriveKeyFromSalt(salt) {
         if (!this.state.key) throw new Error("Session locked");
+        if (!salt) throw new Error("Salt is required for key derivation.");
 
         return crypto.subtle.deriveKey(
             {
                 name: "PBKDF2",
-                salt: salt,
+                salt,
                 iterations: APP_CONFIG.PBKDF2_ITERATIONS,
                 hash: "SHA-256"
             },
@@ -530,34 +542,6 @@ async encrypt(text) {
         blob.set(new Uint8Array(cipher), 1 + salt.length + iv.length);
         
         return blob;
-    },
-
-    async decrypt(buffer) {
-        if (buffer.byteLength < 30) throw new Error("File too small/invalid");
-        
-        const view = new Uint8Array(buffer);
-        const version = view[0];
-        if (version !== APP_CONFIG.FILE_FORMAT_VERSION) throw new Error("Unknown file version");
-
-        // 1. Extract Salt and IV from the file itself
-        const salt = view.slice(1, 1 + APP_CONFIG.SALT_LENGTH);
-        const iv = view.slice(1 + APP_CONFIG.SALT_LENGTH, 1 + APP_CONFIG.SALT_LENGTH + APP_CONFIG.IV_LENGTH);
-        const ciphertext = view.slice(1 + APP_CONFIG.SALT_LENGTH + APP_CONFIG.IV_LENGTH);
-
-        // 2. Derive the key using THIS file's salt
-        const fileKey = await this.deriveKeyFromSalt(salt);
-
-        // 3. Decrypt (AES-GCM will throw if the key is wrong or data is tampered)
-        try {
-            const decrypted = await crypto.subtle.decrypt(
-                { name: "AES-GCM", iv }, 
-                fileKey, 
-                ciphertext
-            );
-            return new TextDecoder().decode(decrypted);
-        } catch (e) {
-            throw new Error("Decryption failed. Wrong key or corrupted file.");
-        }
     },
 
     async computeDigest(buffer) {
@@ -925,6 +909,12 @@ async save() {
     },
 
     // --- SYNC ---
+    _updateSyncMetadata(file, digest, now) {
+        this.state.lastMTime = file.lastModified;
+        this.state.lastDigest = digest;
+        this.state.lastDigestCheck = now;
+    },
+
     async syncFromDisk() {
         if (!this.state.currentHandle || !this.state.key || this.state.syncInProgress || this.state.decryptionFailed) return;
         clearTimeout(this.state._saveUnlockTimeout);
@@ -950,9 +940,7 @@ async save() {
             const buffer = await file.arrayBuffer();
             const digest = await this.computeDigest(buffer);
             if (digest === this.state.lastDigest) {
-                this.state.lastMTime = file.lastModified;
-                this.state.lastDigest = digest;
-                this.state.lastDigestCheck = now;
+                this._updateSyncMetadata(file, digest, now);
                 return;
             }
             this.state.lastDigestCheck = now;
@@ -968,9 +956,7 @@ async save() {
             if (!this.state.isDirty) {
                 document.getElementById('editor').value = remoteText;
                 this.state.baseContent = remoteText;
-                this.state.lastMTime = file.lastModified;
-                this.state.lastDigest = digest;
-                this.state.lastDigestCheck = now;
+                this._updateSyncMetadata(file, digest, now);
                 this.state.isDirty = false;
                 document.getElementById('save-status').textContent = 'Synced from disk';
                 return;
@@ -986,9 +972,7 @@ async save() {
                 await this._storeBackup(this.state.currentHandle.name, localText);
                 document.getElementById('editor').value = remoteText;
                 this.state.baseContent = remoteText;
-                this.state.lastMTime = file.lastModified;
-                this.state.lastDigest = digest;
-                this.state.lastDigestCheck = now;
+                this._updateSyncMetadata(file, digest, now);
                 this.state.isDirty = false;
                 this.showToast('Remote updated — local edits backed up');
                 document.getElementById('save-status').textContent = 'Synced from disk';
@@ -997,18 +981,14 @@ async save() {
 
             // If base matches remote, nothing new from remote
             if (baseText === remoteText) {
-                this.state.lastMTime = file.lastModified;
-                this.state.lastDigest = digest;
-                this.state.lastDigestCheck = now;
+                this._updateSyncMetadata(file, digest, now);
                 return;
             }
             // If base matches local, local had no real change
             if (baseText === localText) {
                 document.getElementById('editor').value = remoteText;
                 this.state.baseContent = remoteText;
-                this.state.lastMTime = file.lastModified;
-                this.state.lastDigest = digest;
-                this.state.lastDigestCheck = now;
+                this._updateSyncMetadata(file, digest, now);
                 this.state.isDirty = false;
                 document.getElementById('save-status').textContent = 'Synced from disk';
                 return;
@@ -1021,9 +1001,7 @@ async save() {
                     // Auto-merged cleanly — update editor and schedule save
                     document.getElementById('editor').value = merged;
                     this.state.baseContent = merged;
-                    this.state.lastMTime = file.lastModified;
-                    this.state.lastDigest = digest;
-                    this.state.lastDigestCheck = now;
+                    this._updateSyncMetadata(file, digest, now);
                     this.state.isDirty = true;
                     clearTimeout(this.state.saveTimeout);
                     this.state.saveTimeout = setTimeout(() => this.save(), APP_CONFIG.AUTO_SAVE_DELAY_MS);
@@ -1033,9 +1011,7 @@ async save() {
                     // Conflict — write merged content with markers into the editor and auto-save
                     document.getElementById('editor').value = merged;
                     this.state.baseContent = remoteText;
-                    this.state.lastMTime = file.lastModified;
-                    this.state.lastDigest = digest;
-                    this.state.lastDigestCheck = now;
+                    this._updateSyncMetadata(file, digest, now);
                     this.state.isDirty = true;
                     clearTimeout(this.state.saveTimeout);
                     this.state.saveTimeout = setTimeout(() => this.save(), APP_CONFIG.AUTO_SAVE_DELAY_MS);
@@ -1047,9 +1023,7 @@ async save() {
                 await this._storeBackup(this.state.currentHandle.name, localText);
                 document.getElementById('editor').value = remoteText;
                 this.state.baseContent = remoteText;
-                this.state.lastMTime = file.lastModified;
-                this.state.lastDigest = digest;
-                this.state.lastDigestCheck = now;
+                this._updateSyncMetadata(file, digest, now);
                 this.state.isDirty = false;
                 this.showToast('Merge failed — local edits backed up, loaded remote version');
                 document.getElementById('save-status').textContent = '⚠️ Fallback to remote';
@@ -1134,7 +1108,6 @@ async save() {
             list.appendChild(fragment);
 
             if (sorted.length === 0) {
-                list.textContent = '';
                 const p = document.createElement('p');
                 p.style.color = 'var(--text-sub)';
                 p.textContent = 'No files yet. Create one to start.';
@@ -1147,70 +1120,49 @@ async save() {
             p.textContent = 'Error loading file list';
             list.appendChild(p);
         }
+    },
+
+    async getDecryptedText(buffer) {
+        if (buffer.byteLength === 0) {
+            return {text: '', success: true, salt: null, key: null};
+        }
+        if (buffer.byteLength < 1 + APP_CONFIG.SALT_LENGTH + APP_CONFIG.IV_LENGTH) {
+            return {text: '### DECRYPTION ERROR ###\nInvalid file format.', success: false};
+        }
+        if (buffer[0] !== APP_CONFIG.FILE_FORMAT_VERSION) {
+            return {text: '### DECRYPTION ERROR ###\nUnsupported file format version.', success: false};
+        }
+        const salt = buffer.slice(1, 1 + APP_CONFIG.SALT_LENGTH);
+        const saltArray = new Uint8Array(salt);
+        let key;
+        if (this.state.currentSalt && arraysEqual(this.state.currentSalt, saltArray)) {
+            key = this.state.currentDerivedKey;
+        } else {
+            try {
+                key = await this.deriveKeyFromSalt(saltArray);
+            } catch (e) {
+                return {text: '### DECRYPTION ERROR ###\nFailed to derive key.', success: false};
+            }
+        }
+        const iv = buffer.slice(1 + APP_CONFIG.SALT_LENGTH, 1 + APP_CONFIG.SALT_LENGTH + APP_CONFIG.IV_LENGTH);
+        const ciphertext = buffer.slice(1 + APP_CONFIG.SALT_LENGTH + APP_CONFIG.IV_LENGTH);
+        try {
+            const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, ciphertext);
+            const text = new TextDecoder().decode(plain);
+            return {text, success: true, salt: saltArray, key};
+        } catch (e) {
+            return {text: '### DECRYPTION ERROR ###\nUnable to decrypt file. Please verify your password is correct.', success: false};
+        }
     }
 };
 
-// Helper function (outside App)
 const arraysEqual = (a, b) => {
-  if (a.byteLength !== b.byteLength) return false;
-  for (let i = 0; i < a.byteLength; i++) if (a[i] !== b[i]) return false;
-  return true;
+    if (a.byteLength !== b.byteLength) return false;
+    for (let i = 0; i < a.byteLength; i++) if (a[i] !== b[i]) return false;
+    return true;
 };
 
-// Attach decryption method to App after object definition
-App.getDecryptedText = async function(buffer) {
-  if (buffer.byteLength === 0) {
-    return {text: '', success: true, salt: null, key: null};
-  }
-  if (buffer.byteLength < 1 + APP_CONFIG.SALT_LENGTH + APP_CONFIG.IV_LENGTH) {
-    return {text: '### DECRYPTION ERROR ###\nInvalid file format.', success: false};
-  }
-  if (buffer[0] !== APP_CONFIG.FILE_FORMAT_VERSION) {
-    return {text: '### DECRYPTION ERROR ###\nUnsupported file format version.', success: false};
-  }
-  const salt = buffer.slice(1, 1 + APP_CONFIG.SALT_LENGTH);
-  const saltArray = new Uint8Array(salt);
-  let key;
-  if (this.state.currentSalt && arraysEqual(this.state.currentSalt, saltArray)) {
-    key = this.state.currentDerivedKey;
-  } else {
-    try {
-      key = await this.getCryptoKey(saltArray, APP_CONFIG.PBKDF2_ITERATIONS);
-    } catch (e) {
-      return {text: '### DECRYPTION ERROR ###\nFailed to derive key.', success: false};
-    }
-  }
-  const iv = buffer.slice(1 + APP_CONFIG.SALT_LENGTH, 1 + APP_CONFIG.SALT_LENGTH + APP_CONFIG.IV_LENGTH);
-  const ciphertext = buffer.slice(1 + APP_CONFIG.SALT_LENGTH + APP_CONFIG.IV_LENGTH);
-  try {
-    const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, ciphertext);
-    const text = new TextDecoder().decode(plain);
-    return {text, success: true, salt: saltArray, key};
-  } catch (e) {
-    return {text: '### DECRYPTION ERROR ###\nUnable to decrypt file. Please verify your password is correct.', success: false};
-  }
-};
-
-// Setup editor input handler
-App.state.editorInputHandler = () => {
-    if (App.state.decryptionFailed) return;
-    App.state.isDirty = true;
-    document.getElementById('save-status').textContent = "● Editing...";
-    clearTimeout(App.state.saveTimeout);
-    App.state.saveTimeout = setTimeout(() => App.save(), APP_CONFIG.AUTO_SAVE_DELAY_MS);
-};
-document.getElementById('editor').oninput = App.state.editorInputHandler;
-
-// Setup password input keypress handler
-App.state.passInputKeypressHandler = (e) => {
-    if (e.key === 'Enter') App.unlock();
-};
-document.getElementById('pass-input').addEventListener('keypress', App.state.passInputKeypressHandler);
-
-// Set version display
 document.getElementById('app-version').textContent = `v${APP_CONFIG.VERSION}`;
-
-// Boot
 App.init();
 </script>
 </body>
