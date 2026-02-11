@@ -207,45 +207,6 @@ state: {
         }
     },
 
-const arraysEqual = (a, b) => {
-  if (a.byteLength !== b.byteLength) return false;
-  for (let i = 0; i < a.byteLength; i++) if (a[i] !== b[i]) return false;
-  return true;
-};
-
-App.getDecryptedText = async function(buffer) {
-  if (buffer.byteLength === 0) {
-    return {text: '', success: true, salt: null, key: null};
-  }
-  if (buffer.byteLength < 1 + APP_CONFIG.SALT_LENGTH + APP_CONFIG.IV_LENGTH) {
-    return {text: '### DECRYPTION ERROR ###\nInvalid file format.', success: false};
-  }
-  if (buffer[0] !== APP_CONFIG.FILE_FORMAT_VERSION) {
-    return {text: '### DECRYPTION ERROR ###\nUnsupported file format version.', success: false};
-  }
-  const salt = buffer.slice(1, 1 + APP_CONFIG.SALT_LENGTH);
-  const saltArray = new Uint8Array(salt);
-  let key;
-  if (this.state.currentSalt && arraysEqual(this.state.currentSalt, saltArray)) {
-    key = this.state.currentDerivedKey;
-  } else {
-    try {
-      key = await this.getCryptoKey(saltArray, APP_CONFIG.PBKDF2_ITERATIONS);
-    } catch (e) {
-      return {text: '### DECRYPTION ERROR ###\nFailed to derive key.', success: false};
-    }
-  }
-  const iv = buffer.slice(1 + APP_CONFIG.SALT_LENGTH, 1 + APP_CONFIG.SALT_LENGTH + APP_CONFIG.IV_LENGTH);
-  const ciphertext = buffer.slice(1 + APP_CONFIG.SALT_LENGTH + APP_CONFIG.IV_LENGTH);
-  try {
-    const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, ciphertext);
-    const text = new TextDecoder().decode(plain);
-    return {text, success: true, salt: saltArray, key};
-  } catch (e) {
-    return {text: '### DECRYPTION ERROR ###\nUnable to decrypt file. Please verify your password is correct.', success: false};
-  }
-};
-    
     setupPolling() {
         this.state.pollIntervalId = setInterval(() => this.pollDisk(), APP_CONFIG.POLL_INTERVAL_MS);
     },
@@ -1091,6 +1052,47 @@ async getCryptoKey(salt, iterations) {
             list.appendChild(p);
         }
     }
+};
+
+// Helper function (outside App)
+const arraysEqual = (a, b) => {
+  if (a.byteLength !== b.byteLength) return false;
+  for (let i = 0; i < a.byteLength; i++) if (a[i] !== b[i]) return false;
+  return true;
+};
+
+// Attach decryption method to App after object definition
+App.getDecryptedText = async function(buffer) {
+  if (buffer.byteLength === 0) {
+    return {text: '', success: true, salt: null, key: null};
+  }
+  if (buffer.byteLength < 1 + APP_CONFIG.SALT_LENGTH + APP_CONFIG.IV_LENGTH) {
+    return {text: '### DECRYPTION ERROR ###\nInvalid file format.', success: false};
+  }
+  if (buffer[0] !== APP_CONFIG.FILE_FORMAT_VERSION) {
+    return {text: '### DECRYPTION ERROR ###\nUnsupported file format version.', success: false};
+  }
+  const salt = buffer.slice(1, 1 + APP_CONFIG.SALT_LENGTH);
+  const saltArray = new Uint8Array(salt);
+  let key;
+  if (this.state.currentSalt && arraysEqual(this.state.currentSalt, saltArray)) {
+    key = this.state.currentDerivedKey;
+  } else {
+    try {
+      key = await this.getCryptoKey(saltArray, APP_CONFIG.PBKDF2_ITERATIONS);
+    } catch (e) {
+      return {text: '### DECRYPTION ERROR ###\nFailed to derive key.', success: false};
+    }
+  }
+  const iv = buffer.slice(1 + APP_CONFIG.SALT_LENGTH, 1 + APP_CONFIG.SALT_LENGTH + APP_CONFIG.IV_LENGTH);
+  const ciphertext = buffer.slice(1 + APP_CONFIG.SALT_LENGTH + APP_CONFIG.IV_LENGTH);
+  try {
+    const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, ciphertext);
+    const text = new TextDecoder().decode(plain);
+    return {text, success: true, salt: saltArray, key};
+  } catch (e) {
+    return {text: '### DECRYPTION ERROR ###\nUnable to decrypt file. Please verify your password is correct.', success: false};
+  }
 };
 
 // Setup editor input handler
