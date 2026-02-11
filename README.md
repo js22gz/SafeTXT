@@ -1,6 +1,6 @@
 SAFE.TXT
 
-A secure, sovereign and simple HTML-based .txt-editor with encryption on all files. Everything happens locally in the browser - no server, no uncrypted data in the cloud.  
+A secure HTML-based .txt-editor with encryption on all files. Everything happens locally in the browser - no server, no uncrypted data in the cloud.  
 Encryption happens in the memory via Web Crypto API and files are autosaved on disk (local or cloud). Plain text never leaves the device. 
 
 
@@ -8,8 +8,6 @@ Functionality and Key Features:
 Edge Encryption: Data is encrypted in the browser memory using AES-GCM 256 via the Web Crypto API.
 
 Zero-Knowledge Architecture: The application is entirely client-side. The developer has no servers, no databases, and zero access to your encryption keys or content.
-
-Storage Sovereignty: Encrypted files are stored directly in your municipality-managed Google Drive, leveraging existing Data Processing Agreements (DPA).
 
 Collision Detection: Session-aware polling prevents data loss during collaborative use by notifying users if a cloud file has been updated by another teacher.
 
@@ -42,6 +40,9 @@ Under the following terms:
 
 Attribution — You must give appropriate credit to the original creator, provide a link to the license, and indicate if changes were made. You may do so in any reasonable manner, but not in any way that suggests the licensor endorses you or your use.
 
-To view a copy of this license, visit http://creativecommons.org/licenses/by/4.0/.
+## License
 
+[![License: MIT](https://img.shields.io)](https://opensource.org/licenses/MIT)
+
+This project is licensed under the terms of the **MIT license**.
 Created for secure, sovereign, and simple text.
