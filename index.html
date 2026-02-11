@@ -163,8 +163,6 @@ const App = {
 state: {
     db: null,
     key: null,
-    currentSalt: null,
-    currentDerivedKey: null,
     currentHandle: null,
     fileObserver: null,
     fileObserverTimeout: null,
@@ -485,26 +483,94 @@ async getCryptoKey(salt, iterations) {
     baseKey, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]
   );
 },
+    /**
+     * Helper: Derive a specific AES-GCM key using the master password and a file-specific salt.
+     */
+    async deriveKeyFromSalt(salt) {
+        if (!this.state.key) throw new Error("Session locked");
         
-    async encrypt(text) {
-      if (!this.state.key) throw new Error('Session not initialized. Please unlock the session first.');
-      let salt = this.state.currentSalt;
-      let key = this.state.currentDerivedKey;
-      if (!salt || !key) {
-        salt = crypto.getRandomValues(new Uint8Array(APP_CONFIG.SALT_LENGTH));
-        key = await this.getCryptoKey(salt, APP_CONFIG.PBKDF2_ITERATIONS);
-        this.state.currentSalt = salt;
-        this.state.currentDerivedKey = key;
-      }
-      const iv = crypto.getRandomValues(new Uint8Array(APP_CONFIG.IV_LENGTH));
-      const cipher = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, new TextEncoder().encode(text));
-      const blob = new Uint8Array(1 + APP_CONFIG.SALT_LENGTH + APP_CONFIG.IV_LENGTH + cipher.byteLength);
-      blob[0] = APP_CONFIG.FILE_FORMAT_VERSION;
-      blob.set(salt, 1);
-      blob.set(iv, 1 + APP_CONFIG.SALT_LENGTH);
-      blob.set(new Uint8Array(cipher), 1 + APP_CONFIG.SALT_LENGTH + APP_CONFIG.IV_LENGTH);
-      return blob;
+        const enc = new TextEncoder();
+        const passwordBuffer = enc.encode(this.state.key);
+        
+        const baseKey = await crypto.subtle.importKey(
+            "raw", 
+            passwordBuffer, 
+            "PBKDF2", 
+            false, 
+            ["deriveKey"]
+        );
+
+        return crypto.subtle.deriveKey(
+            {
+                name: "PBKDF2",
+                salt: salt,
+                iterations: APP_CONFIG.PBKDF2_ITERATIONS,
+                hash: "SHA-256"
+            },
+            baseKey,
+            { name: "AES-GCM", length: 256 },
+            false,
+            ["encrypt", "decrypt"]
+        );
     },
+        
+async encrypt(text) {
+        if (!this.state.key) throw new Error('Unlock session first.');
+
+        // 1. Generate unique salt and IV for THIS specific save operation
+        const salt = crypto.getRandomValues(new Uint8Array(APP_CONFIG.SALT_LENGTH));
+        const iv = crypto.getRandomValues(new Uint8Array(APP_CONFIG.IV_LENGTH));
+        
+        // 2. Derive the key specifically for this salt
+        const fileKey = await this.deriveKeyFromSalt(salt);
+        
+        // 3. Encrypt
+        const encodedText = new TextEncoder().encode(text);
+        const cipher = await crypto.subtle.encrypt(
+            { name: "AES-GCM", iv }, 
+            fileKey, 
+            encodedText
+        );
+
+        // 4. Pack the binary: [Version][Salt][IV][Cipher]
+        const blob = new Uint8Array(1 + salt.length + iv.length + cipher.byteLength);
+        blob[0] = APP_CONFIG.FILE_FORMAT_VERSION;
+        blob.set(salt, 1);
+        blob.set(iv, 1 + salt.length);
+        blob.set(new Uint8Array(cipher), 1 + salt.length + iv.length);
+        
+        return blob;
+    },
+
+    async decrypt(buffer) {
+        if (buffer.byteLength < 30) throw new Error("File too small/invalid");
+        
+        const view = new Uint8Array(buffer);
+        const version = view[0];
+        if (version !== APP_CONFIG.FILE_FORMAT_VERSION) throw new Error("Unknown file version");
+
+        // 1. Extract Salt and IV from the file itself
+        const salt = view.slice(1, 1 + APP_CONFIG.SALT_LENGTH);
+        const iv = view.slice(1 + APP_CONFIG.SALT_LENGTH, 1 + APP_CONFIG.SALT_LENGTH + APP_CONFIG.IV_LENGTH);
+        const ciphertext = view.slice(1 + APP_CONFIG.SALT_LENGTH + APP_CONFIG.IV_LENGTH);
+
+        // 2. Derive the key using THIS file's salt
+        const fileKey = await this.deriveKeyFromSalt(salt);
+
+        // 3. Decrypt (AES-GCM will throw if the key is wrong or data is tampered)
+        try {
+            const decrypted = await crypto.subtle.decrypt(
+                { name: "AES-GCM", iv }, 
+                fileKey, 
+                ciphertext
+            );
+            return new TextDecoder().decode(decrypted);
+        } catch (e) {
+            throw new Error("Decryption failed. Wrong key or corrupted file.");
+        }
+    }
+};
+
     async computeDigest(buffer) {
         const hash = await crypto.subtle.digest('SHA-256', buffer);
         return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('');
