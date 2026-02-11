@@ -65,6 +65,22 @@ function withSecurityHeaders(response) {
   });
 }
 
+// Validate response before caching to prevent cache poisoning attacks
+function isValidResponse(response) {
+  // Must be a successful response
+  if (!response || response.status !== 200) {
+    return false;
+  }
+  
+  // Must be a basic response (same-origin, not opaque)
+  // This prevents caching responses from MITM attacks or CDN compromises
+  if (response.type !== 'basic') {
+    return false;
+  }
+  
+  return true;
+}
+
 // Fetch event: Scoped strategy — only handle known assets
 self.addEventListener('fetch', (e) => {
   if (e.request.method !== 'GET') return;
@@ -80,8 +96,24 @@ self.addEventListener('fetch', (e) => {
     e.respondWith(
       fetch(e.request)
         .then(response => {
+          // SECURITY: Validate response before caching
+          if (!isValidResponse(response)) {
+            console.warn('[Service Worker] Invalid response detected, not caching:', {
+              status: response.status,
+              type: response.type,
+              url: e.request.url
+            });
+            // Return the response but don't cache it
+            return withSecurityHeaders(response);
+          }
+          
+          // Response is valid, cache it
           const clone = response.clone();
-          caches.open(CACHE_NAME).then(cache => cache.put(e.request, clone));
+          caches.open(CACHE_NAME).then(cache => {
+            cache.put(e.request, clone).catch(err => {
+              console.error('[Service Worker] Failed to cache response:', err);
+            });
+          });
           return withSecurityHeaders(response);
         })
         .catch(() =>
@@ -104,9 +136,26 @@ self.addEventListener('fetch', (e) => {
     caches.match(e.request)
       .then(cached => {
         if (cached) return withSecurityHeaders(cached);
+        
         return fetch(e.request).then(response => {
+          // SECURITY: Validate response before caching
+          if (!isValidResponse(response)) {
+            console.warn('[Service Worker] Invalid response detected, not caching:', {
+              status: response.status,
+              type: response.type,
+              url: e.request.url
+            });
+            // Return the response but don't cache it
+            return withSecurityHeaders(response);
+          }
+          
+          // Response is valid, cache it
           const clone = response.clone();
-          caches.open(CACHE_NAME).then(cache => cache.put(e.request, clone));
+          caches.open(CACHE_NAME).then(cache => {
+            cache.put(e.request, clone).catch(err => {
+              console.error('[Service Worker] Failed to cache response:', err);
+            });
+          });
           return withSecurityHeaders(response);
         });
       })
