@@ -146,6 +146,7 @@ const APP_CONFIG = {
     FILE_FORMAT_VERSION: 0x01,
     SALT_LENGTH: 16,
     IV_LENGTH: 12,
+    GCM_TAG_LENGTH: 16,
     PBKDF2_ITERATIONS: 600000,
     OBSERVER_DEBOUNCE_MS: 250,
     DIGEST_THROTTLE_MS: 15000, // throttle digest hashing to reduce shared-drive I/O
@@ -1065,7 +1066,8 @@ async save() {
 
         try {
             const results = await this.getHandlesFromDB();
-            const sorted = results.sort((a, b) => a.name.localeCompare(b.name));
+            const handles = results.filter(h => h && typeof h.kind === 'string' && typeof h.getFile === 'function');
+            const sorted = handles.sort((a, b) => a.name.localeCompare(b.name));
             const fragment = document.createDocumentFragment();
 
             sorted.forEach(h => {
@@ -1114,7 +1116,7 @@ async save() {
         if (buffer.byteLength === 0) {
             return {plainBytes: new Uint8Array(0), success: true};
         }
-        if (buffer.byteLength < 1 + APP_CONFIG.SALT_LENGTH + APP_CONFIG.IV_LENGTH) {
+        if (buffer.byteLength < 1 + APP_CONFIG.SALT_LENGTH + APP_CONFIG.IV_LENGTH + APP_CONFIG.GCM_TAG_LENGTH) {
             return {errorMessage: '### DECRYPTION ERROR ###\nInvalid file format.', success: false};
         }
         if (buffer[0] !== APP_CONFIG.FILE_FORMAT_VERSION) {
