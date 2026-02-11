@@ -210,22 +210,25 @@ state: {
         this.state.fileObserverTimeout = null;
     },
 
-    async setupFileObserver(handle) {
-        if (!handle || !('FileSystemObserver' in window)) return;
-        try {
-            this.teardownFileObserver();
-            const observer = new FileSystemObserver(() => {
-                if (this.state.fileObserver !== observer) return;
-                if (this.state.syncInProgress) return;
-                clearTimeout(this.state.fileObserverTimeout);
-                this.state.fileObserverTimeout = setTimeout(() => {
-                    if (this.state.fileObserver !== observer) return;
-                    void this.syncFromDisk();
-                }, APP_CONFIG.OBSERVER_DEBOUNCE_MS);
-            });
-            this.state.fileObserver = observer;
-            await observer.observe(handle);
-        } catch (e) {
+async setupFileObserver(handle) {
+    if (!handle || !('FileSystemObserver' in window)) return;
+    try {
+        this.teardownFileObserver();
+        const observer = new FileSystemObserver((records) => {
+            // IGNORE if we are currently saving or if this is a "metadata-only" change
+            if (this.state.syncInProgress) return;
+            
+            clearTimeout(this.state.fileObserverTimeout);
+            this.state.fileObserverTimeout = setTimeout(() => {
+                // Double check flag inside the debounce
+                if (this.state.syncInProgress) return; 
+                void this.syncFromDisk();
+            }, APP_CONFIG.OBSERVER_DEBOUNCE_MS);
+        });
+        
+        this.state.fileObserver = observer;
+        await observer.observe(handle);
+    } catch (e) {
             this.teardownFileObserver();
             const reason = e?.name || 'unknown';
             console.warn(`FileSystemObserver setup failed (${reason}); automatic file sync unavailable.`, e);
@@ -681,30 +684,39 @@ async encrypt(text) {
         }
     },
 
-    async save() {
-        if (!this.state.currentHandle || !this.state.key || this.state.decryptionFailed) return;
+async save() {
+    if (!this.state.currentHandle || !this.state.key || this.state.decryptionFailed) return;
 
-        try {
-            const encryptedBytes = await this.encrypt(document.getElementById('editor').value);
-            const stream = await this.state.currentHandle.createWritable();
-            await stream.write(encryptedBytes);
-            await stream.close();
+    try {
+        // LOCK: Tell the observer to ignore the upcoming disk event
+        this.state.syncInProgress = true; 
 
-            const digest = await this.computeDigest(encryptedBytes);
-            const f = await this.state.currentHandle.getFile();
-            this.state.lastMTime = f.lastModified;
-            this.state.lastDigest = digest;
-            this.state.lastDigestCheck = Date.now();
-            this.state.isDirty = false;
-            this.state.baseContent = document.getElementById('editor').value;
-            document.getElementById('save-status').textContent = "✓ Encrypted & Saved";
-        } catch (e) {
-            console.error('Error saving file:', e);
-            document.getElementById('save-status').textContent = "⚠️ Error Saving";
-            alert(`Failed to save file: ${e.message || 'Unknown error'}`);
-        }
-    },
+        const encryptedBytes = await this.encrypt(document.getElementById('editor').value);
+        const stream = await this.state.currentHandle.createWritable();
+        await stream.write(encryptedBytes);
+        await stream.close();
 
+        // Update local metadata so we know what the "latest" version looks like
+        const digest = await this.computeDigest(encryptedBytes);
+        const f = await this.state.currentHandle.getFile();
+        this.state.lastMTime = f.lastModified;
+        this.state.lastDigest = digest;
+        this.state.lastDigestCheck = Date.now();
+        this.state.isDirty = false;
+        this.state.baseContent = document.getElementById('editor').value;
+        
+        document.getElementById('save-status').textContent = "✓ Encrypted & Saved";
+    } catch (e) {
+        console.error('Error saving file:', e);
+        document.getElementById('save-status').textContent = "⚠️ Error Saving";
+    } finally {
+        // UNLOCK: Allow the observer to listen for external changes again
+        // We use a small timeout to ensure the OS has finished flushing the write
+        setTimeout(() => { this.state.syncInProgress = false; }, 500);
+    }
+},
+
+    
     async saveOrSaveAs() {
         if (!this.state.key) {
             document.getElementById('save-status').textContent = "⚠️ Session locked";
