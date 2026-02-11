@@ -147,7 +147,6 @@ const APP_CONFIG = {
     SALT_LENGTH: 16,
     IV_LENGTH: 12,
     PBKDF2_ITERATIONS: 600000,
-    POLL_INTERVAL_MS: 4000,
     OBSERVER_DEBOUNCE_MS: 250,
     DIGEST_THROTTLE_MS: 15000, // throttle digest hashing to reduce shared-drive I/O
     AUTO_SAVE_DELAY_MS: 1000,
@@ -166,8 +165,7 @@ state: {
     currentHandle: null,
     fileObserver: null,
     fileObserverTimeout: null,
-    pollInProgress: false,
-    pollIntervalId: null,
+    syncInProgress: false,
     lastMTime: 0,
     lastDigest: null,
     lastDigestCheck: 0,
@@ -198,16 +196,11 @@ state: {
 
             this.setupFileListHandlers();
             await this.renderList();
-            this.setupPolling();
             this.setupServiceWorker();
         } catch (e) {
             console.error('Init failed:', e);
             this.state.db = null;
         }
-    },
-
-    setupPolling() {
-        this.state.pollIntervalId = setInterval(() => this.pollDisk(), APP_CONFIG.POLL_INTERVAL_MS);
     },
 
     teardownFileObserver() {
@@ -223,11 +216,11 @@ state: {
             this.teardownFileObserver();
             const observer = new FileSystemObserver(() => {
                 if (this.state.fileObserver !== observer) return;
-                if (this.state.pollInProgress) return;
+                if (this.state.syncInProgress) return;
                 clearTimeout(this.state.fileObserverTimeout);
                 this.state.fileObserverTimeout = setTimeout(() => {
                     if (this.state.fileObserver !== observer) return;
-                    void this.pollDisk();
+                    void this.syncFromDisk();
                 }, APP_CONFIG.OBSERVER_DEBOUNCE_MS);
             });
             this.state.fileObserver = observer;
@@ -235,7 +228,7 @@ state: {
         } catch (e) {
             this.teardownFileObserver();
             const reason = e?.name || 'unknown';
-            console.warn(`FileSystemObserver setup failed (${reason}); falling back to polling-only sync.`, e);
+            console.warn(`FileSystemObserver setup failed (${reason}); automatic file sync unavailable.`, e);
         }
     },
 
@@ -403,8 +396,6 @@ async unlock() {
     async lock(force = false) {
         if (!force && !confirm("Lock session? You will need to re-enter your key to view notes.")) return;
         clearTimeout(this.state.saveTimeout);
-        clearInterval(this.state.pollIntervalId);
-        this.state.pollIntervalId = null;
         clearTimeout(this._toastTimer);
         this._toastTimer = null;
         this.inactivityManager.cleanup();
@@ -745,10 +736,10 @@ async encrypt(text) {
 
         document.getElementById('save-status').textContent = "🔄 Checking for updates...";
         
-        // Manually trigger the pollDisk to check for remote changes
-        await this.pollDisk();
+        // Manually trigger syncFromDisk to check for remote changes
+        await this.syncFromDisk();
         
-        // If pollDisk updated the status, keep that message; otherwise, indicate no changes
+        // If syncFromDisk updated the status, keep that message; otherwise, indicate no changes
         const statusAfter = document.getElementById('save-status').textContent;
         if (statusAfter === "🔄 Checking for updates...") {
             document.getElementById('save-status').textContent = "✓ File is up to date";
@@ -917,9 +908,9 @@ async encrypt(text) {
     },
 
     // --- SYNC ---
-    async pollDisk() {
-        if (!this.state.currentHandle || !this.state.key || this.state.pollInProgress || this.state.decryptionFailed) return;
-        this.state.pollInProgress = true;
+    async syncFromDisk() {
+        if (!this.state.currentHandle || !this.state.key || this.state.syncInProgress || this.state.decryptionFailed) return;
+        this.state.syncInProgress = true;
         try {
             const now = Date.now();
             const hasDigest = this.state.lastDigest !== null;
@@ -1046,10 +1037,10 @@ async encrypt(text) {
                 document.getElementById('save-status').textContent = '⚠️ Fallback to remote';
             }
         } catch (e) {
-            // Log polling failures for debugging, but don't alert user
-            console.warn('Polling error:', e);
+            // Log sync failures for debugging, but don't alert user
+            console.warn('Sync error:', e);
         }
-        finally { this.state.pollInProgress = false; }
+        finally { this.state.syncInProgress = false; }
     },
 
     // --- SIDEBAR UI ---

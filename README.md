@@ -9,7 +9,7 @@ Edge Encryption: Data is encrypted in the browser memory using AES-GCM 256 via t
 
 Zero-Knowledge Architecture: The application is entirely client-side. The developer has no servers, no databases, and zero access to your encryption keys or content.
 
-Collision Detection: Session-aware polling prevents data loss during collaborative use by notifying users if a cloud file has been updated by another teacher.
+Collision Detection: FileSystemObserver-based sync prevents data loss during collaborative use by notifying users if a cloud file has been updated by another teacher.
 
 Privacy by Design: No tracking, no cookies, and no telemetry.
 
