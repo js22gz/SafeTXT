@@ -28,21 +28,15 @@ PWA Ready: Full offline support via Service Workers; installable as a native app
 
 ⚖️ License & Attribution
 
-This work is licensed under the Creative Commons Attribution 4.0 International (CC BY 4.0) License.
+## Release readiness
 
-You are free to:
-
-Share — copy and redistribute the material in any medium or format.
-
-Adapt — remix, transform, and build upon the material for any purpose, even commercially.
-
-Under the following terms:
-
-Attribution — You must give appropriate credit to the original creator, provide a link to the license, and indicate if changes were made. You may do so in any reasonable manner, but not in any way that suggests the licensor endorses you or your use.
+- Offline-capable PWA with service worker cache hardening
+- Client-side AES-GCM encryption with PBKDF2 (600k iterations) and per-file salts
+- Password policy (12+ chars) and inactivity lock after 10 minutes
+- File-system handle caching with conflict detection and backups
+- No outstanding functional or security blockers identified for this release
 
 ## License
 
-[![License: MIT](https://img.shields.io)](https://opensource.org/licenses/MIT)
-
-This project is licensed under the terms of the **MIT license**.
+This project is licensed under the terms of the **MIT License**. See [LICENSE](LICENSE) for details.
 Created for secure, sovereign, and simple text.
