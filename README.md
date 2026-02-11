@@ -26,23 +26,10 @@ Security:
 
 PWA Ready: Full offline support via Service Workers; installable as a native app on Chrome OS, Windows, and macOS.
 
-⚖️ License & Attribution
-
-This work is licensed under the Creative Commons Attribution 4.0 International (CC BY 4.0) License.
-
-You are free to:
-
-Share — copy and redistribute the material in any medium or format.
-
-Adapt — remix, transform, and build upon the material for any purpose, even commercially.
-
-Under the following terms:
-
-Attribution — You must give appropriate credit to the original creator, provide a link to the license, and indicate if changes were made. You may do so in any reasonable manner, but not in any way that suggests the licensor endorses you or your use.
-
 ## License
 
-[![License: MIT](https://img.shields.io)](https://opensource.org/licenses/MIT)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-This project is licensed under the terms of the **MIT license**.
+This project is licensed under the terms of the **MIT license**. See [LICENSE](LICENSE) for details.
+
 Created for secure, sovereign, and simple text.

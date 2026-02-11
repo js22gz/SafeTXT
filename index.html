@@ -172,6 +172,7 @@ state: {
     decryptionFailed: false,
     baseContent: null,
     saveTimeout: null,
+    pendingLaunchHandle: null,
     // Event handlers storage for proper cleanup
     fileListClickHandler: null,
     fileListKeydownHandler: null,
@@ -210,6 +211,7 @@ state: {
             this.setupFileListHandlers();
             await this.renderList();
             this.setupServiceWorker();
+            this.setupLaunchQueue();
         } catch (e) {
             console.error('Init failed:', e);
             this.state.db = null;
@@ -271,6 +273,21 @@ async setupFileObserver(handle) {
             navigator.serviceWorker.register('./sw.js')
                 .then(() => console.log('Service Worker registered successfully'))
                 .catch((error) => console.warn('Service Worker registration failed:', error));
+        }
+    },
+
+    setupLaunchQueue() {
+        if ('launchQueue' in window) {
+            window.launchQueue.setConsumer(async (launchParams) => {
+                if (!launchParams.files || launchParams.files.length === 0) return;
+                const handle = launchParams.files[0];
+                if (this.state.key) {
+                    await this.persistHandle(handle);
+                    await this.loadFile(handle);
+                } else {
+                    this.state.pendingLaunchHandle = handle;
+                }
+            });
         }
     },
 
@@ -427,6 +444,13 @@ async unlock() {
         document.getElementById('save-status').textContent = "Session Active";
         this.updateSaveButtonLabel();
         this.inactivityManager.init();
+
+        if (this.state.pendingLaunchHandle) {
+            const handle = this.state.pendingLaunchHandle;
+            this.state.pendingLaunchHandle = null;
+            await this.persistHandle(handle);
+            await this.loadFile(handle);
+        }
     } catch (e) {
         passBytes.fill(0);
         console.error('Unlock failed:', e);
@@ -764,130 +788,6 @@ async save() {
         }
     },
 
-    // --- DIFF / MERGE ---
-    /**
-     * Compute longest common subsequence length table for two arrays.
-     */
-    _lcsTable(a, b) {
-        const m = a.length, n = b.length;
-        const dp = Array.from({length: m + 1}, () => new Uint32Array(n + 1));
-        for (let i = 1; i <= m; i++)
-            for (let j = 1; j <= n; j++)
-                dp[i][j] = a[i - 1] === b[j - 1] ? dp[i - 1][j - 1] + 1 : Math.max(dp[i - 1][j], dp[i][j - 1]);
-        return dp;
-    },
-
-    /**
-     * Line-based three-way merge. Returns {merged, hasConflict}.
-     * base/local/remote are strings. Splits on newlines and merges.
-     */
-    diff3Merge(base, local, remote) {
-        const bLines = base.split('\n');
-        const lLines = local.split('\n');
-        const rLines = remote.split('\n');
-
-        // Build diff hunks from base→child using LCS back-trace
-        const diffHunks = (base, child) => {
-            const dp = this._lcsTable(base, child);
-            const hunks = [];
-            let i = base.length, j = child.length;
-            const pairs = [];
-            while (i > 0 && j > 0) {
-                if (base[i - 1] === child[j - 1]) { pairs.push([i - 1, j - 1]); i--; j--; }
-                else if (dp[i - 1][j] >= dp[i][j - 1]) i--;
-                else j--;
-            }
-            pairs.reverse();
-            let bi = 0, ci = 0;
-            for (const [bm, cm] of pairs) {
-                if (bi < bm || ci < cm) hunks.push({baseStart: bi, baseEnd: bm, childStart: ci, childEnd: cm});
-                bi = bm + 1; ci = cm + 1;
-            }
-            if (bi < base.length || ci < child.length) hunks.push({baseStart: bi, baseEnd: base.length, childStart: ci, childEnd: child.length});
-            return hunks;
-        };
-
-        const lHunks = diffHunks(bLines, lLines);
-        const rHunks = diffHunks(bLines, rLines);
-
-        // Build a map of base line ranges changed by each side
-        const touchedByL = new Set();
-        const touchedByR = new Set();
-        for (const h of lHunks) for (let k = h.baseStart; k < h.baseEnd; k++) touchedByL.add(k);
-        for (const h of rHunks) for (let k = h.baseStart; k < h.baseEnd; k++) touchedByR.add(k);
-
-        // Check for overlapping changes (conflicts)
-        let hasConflict = false;
-        for (const line of touchedByL) {
-            if (touchedByR.has(line)) { hasConflict = true; break; }
-        }
-
-        if (!hasConflict) {
-            // Non-conflicting: apply remote hunks to local (local is our working copy)
-            // Rebuild from base, preferring local changes where local changed, remote where remote changed, base otherwise
-            const result = [];
-            let bi = 0;
-            const lMap = new Map(); // baseStart -> hunk
-            const rMap = new Map();
-            for (const h of lHunks) lMap.set(h.baseStart, h);
-            for (const h of rHunks) rMap.set(h.baseStart, h);
-
-            while (bi < bLines.length) {
-                if (lMap.has(bi)) {
-                    const h = lMap.get(bi);
-                    for (let c = h.childStart; c < h.childEnd; c++) result.push(lLines[c]);
-                    bi = h.baseEnd;
-                } else if (rMap.has(bi)) {
-                    const h = rMap.get(bi);
-                    for (let c = h.childStart; c < h.childEnd; c++) result.push(rLines[c]);
-                    bi = h.baseEnd;
-                } else {
-                    result.push(bLines[bi]);
-                    bi++;
-                }
-            }
-            // Append any trailing additions from local or remote
-            for (const h of lHunks) {
-                if (h.baseStart >= bLines.length) for (let c = h.childStart; c < h.childEnd; c++) result.push(lLines[c]);
-            }
-            for (const h of rHunks) {
-                if (h.baseStart >= bLines.length) for (let c = h.childStart; c < h.childEnd; c++) result.push(rLines[c]);
-            }
-            return {merged: result.join('\n'), hasConflict: false};
-        }
-
-        // Conflict: produce annotated output with pre-indexed hunks for O(n)
-        const lIdx = new Map();
-        const rIdx = new Map();
-        for (const h of lHunks) for (let k = h.baseStart; k < h.baseEnd; k++) lIdx.set(k, h);
-        for (const h of rHunks) for (let k = h.baseStart; k < h.baseEnd; k++) rIdx.set(k, h);
-
-        const out = [];
-        let bi = 0;
-        while (bi < bLines.length) {
-            const lh = lIdx.get(bi);
-            const rh = rIdx.get(bi);
-            if (lh && rh) {
-                out.push('<<<<<<< LOCAL');
-                for (let c = lh.childStart; c < lh.childEnd; c++) out.push(lLines[c]);
-                out.push('=======');
-                for (let c = rh.childStart; c < rh.childEnd; c++) out.push(rLines[c]);
-                out.push('>>>>>>> REMOTE');
-                bi = Math.max(lh.baseEnd, rh.baseEnd);
-            } else if (lh) {
-                for (let c = lh.childStart; c < lh.childEnd; c++) out.push(lLines[c]);
-                bi = lh.baseEnd;
-            } else if (rh) {
-                for (let c = rh.childStart; c < rh.childEnd; c++) out.push(rLines[c]);
-                bi = rh.baseEnd;
-            } else {
-                out.push(bLines[bi]);
-                bi++;
-            }
-        }
-        return {merged: out.join('\n'), hasConflict: true};
-    },
-
     // --- TOAST ---
     showToast(message, duration = 5000) {
         const el = document.getElementById('toast');
@@ -1006,8 +906,7 @@ async save() {
             localBytes.fill(0);
 
             // Both local and remote have changes relative to base.
-            // Conservative approach: don't attempt automatic merge (diff3Merge is unreliable).
-            // Store local edits as backup and load the remote version.
+            // Conservative approach: store local edits as backup and load the remote version.
             await this._storeBackup(this.state.currentHandle.name, localText);
             document.getElementById('editor').value = new TextDecoder().decode(remoteBytes);
             this._setBaseContent(remoteBytes);
