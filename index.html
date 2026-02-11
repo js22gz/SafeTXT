@@ -174,6 +174,7 @@ state: {
     lastDigest: null,
     lastDigestCheck: 0,
     isDirty: false,
+    decryptionFailed: false,
     baseContent: null,
     saveTimeout: null,
     // Event handlers storage for proper cleanup
@@ -597,15 +598,24 @@ async getCryptoKey(salt, iterations) {
                         
             const result = await this.getDecryptedText(new Uint8Array(buffer));
             const text = result.text;
+            const editor = document.getElementById('editor');
             if (result.success) {
               this.state.currentSalt = result.salt;
               this.state.currentDerivedKey = result.key;
+              this.state.decryptionFailed = false;
+              editor.disabled = false;
+              editor.value = text;
+              this.state.baseContent = text;
+              document.getElementById('save-status').textContent = "Loaded from disk";
+            } else {
+              this.state.decryptionFailed = true;
+              editor.value = text;
+              editor.disabled = true;
+              this.state.baseContent = null;
+              document.getElementById('save-status').textContent = "⚠️ Decryption failed — editing disabled";
             }
-            this.state.baseContent = text;
-            document.getElementById('editor').value = text;
             // Use textContent to prevent XSS
             document.getElementById('active-filename').textContent = h.name;
-            document.getElementById('save-status').textContent = "Loaded from disk";
             await this.renderList();
             await this.setupFileObserver(h);
         } catch (e) {
@@ -616,7 +626,7 @@ async getCryptoKey(salt, iterations) {
     },
 
     async save() {
-        if (!this.state.currentHandle || !this.state.key) return;
+        if (!this.state.currentHandle || !this.state.key || this.state.decryptionFailed) return;
 
         try {
             const encryptedBytes = await this.encrypt(document.getElementById('editor').value);
@@ -644,6 +654,10 @@ async getCryptoKey(salt, iterations) {
             document.getElementById('save-status').textContent = "⚠️ Session locked";
             return;
         }
+        if (this.state.decryptionFailed) {
+            document.getElementById('save-status').textContent = "⚠️ Cannot save — file not decrypted";
+            return;
+        }
 
         if (this.state.currentHandle) {
             // File already exists, just save
@@ -657,6 +671,10 @@ async getCryptoKey(salt, iterations) {
     async refreshFile() {
         if (!this.state.currentHandle || !this.state.key) {
             document.getElementById('save-status').textContent = "⚠️ No file to refresh";
+            return;
+        }
+        if (this.state.decryptionFailed) {
+            document.getElementById('save-status').textContent = "⚠️ Cannot refresh — file not decrypted";
             return;
         }
 
@@ -835,7 +853,7 @@ async getCryptoKey(salt, iterations) {
 
     // --- SYNC ---
     async pollDisk() {
-        if (!this.state.currentHandle || !this.state.key || this.state.pollInProgress) return;
+        if (!this.state.currentHandle || !this.state.key || this.state.pollInProgress || this.state.decryptionFailed) return;
         this.state.pollInProgress = true;
         try {
             const now = Date.now();
@@ -1097,6 +1115,7 @@ App.getDecryptedText = async function(buffer) {
 
 // Setup editor input handler
 App.state.editorInputHandler = () => {
+    if (App.state.decryptionFailed) return;
     App.state.isDirty = true;
     document.getElementById('save-status').textContent = "● Editing...";
     clearTimeout(App.state.saveTimeout);
