@@ -154,8 +154,6 @@ const APP_CONFIG = {
     MAX_FILE_SIZE_MB: 100, // Maximum file size in megabytes
     DB_NAME: 'LocalNote_v2026', // preserve original name so existing users keep their file handles
     DB_VERSION: 1,
-    UNLOCK_MAX_ATTEMPTS: 5, // Maximum failed unlock attempts before lockout
-    UNLOCK_LOCKOUT_DURATION_MS: 30000 // 30 seconds lockout after max failed attempts
 };
 
 const App = {
@@ -381,7 +379,10 @@ async unlock() {
     }
     
     try {
-        this.state.key = pass;
+        const enc = new TextEncoder();
+        this.state.key = await crypto.subtle.importKey(
+            "raw", enc.encode(pass), "PBKDF2", false, ["deriveKey"]
+        );
         
         inputEl.value = "";
         document.getElementById('unlock-overlay').classList.add('hidden');
@@ -399,6 +400,7 @@ async unlock() {
     async lock(force = false) {
         if (!force && !confirm("Lock session? You will need to re-enter your key to view notes.")) return;
         clearTimeout(this.state.saveTimeout);
+        clearTimeout(this.state._saveUnlockTimeout);
         clearTimeout(this._toastTimer);
         this._toastTimer = null;
         this.inactivityManager.cleanup();
@@ -435,7 +437,7 @@ async unlock() {
             passInput.value = '';
         }
         
-        // Clear key references (original string will persist until GC)
+        // Clear key reference (CryptoKey is opaque and not inspectable)
         this.state.key = null;
         this.state.currentSalt = null;
         this.state.currentDerivedKey = null;
@@ -470,11 +472,9 @@ async unlock() {
     // --- CRYPTO ENGINE ---
 async getCryptoKey(salt, iterations) {
   if (!salt) throw new Error('Salt is required for key derivation.');
-  const enc = new TextEncoder();
-  const baseKey = await crypto.subtle.importKey("raw", enc.encode(this.state.key), "PBKDF2", false, ["deriveKey"]);
   return crypto.subtle.deriveKey(
     { name: "PBKDF2", salt, iterations: iterations || APP_CONFIG.PBKDF2_ITERATIONS, hash: "SHA-256" },
-    baseKey, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]
+    this.state.key, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]
   );
 },
     /**
@@ -482,17 +482,6 @@ async getCryptoKey(salt, iterations) {
      */
     async deriveKeyFromSalt(salt) {
         if (!this.state.key) throw new Error("Session locked");
-        
-        const enc = new TextEncoder();
-        const passwordBuffer = enc.encode(this.state.key);
-        
-        const baseKey = await crypto.subtle.importKey(
-            "raw", 
-            passwordBuffer, 
-            "PBKDF2", 
-            false, 
-            ["deriveKey"]
-        );
 
         return crypto.subtle.deriveKey(
             {
@@ -501,7 +490,7 @@ async getCryptoKey(salt, iterations) {
                 iterations: APP_CONFIG.PBKDF2_ITERATIONS,
                 hash: "SHA-256"
             },
-            baseKey,
+            this.state.key,
             { name: "AES-GCM", length: 256 },
             false,
             ["encrypt", "decrypt"]
@@ -511,14 +500,21 @@ async getCryptoKey(salt, iterations) {
 async encrypt(text) {
         if (!this.state.key) throw new Error('Unlock session first.');
 
-        // 1. Generate unique salt and IV for THIS specific save operation
-        const salt = crypto.getRandomValues(new Uint8Array(APP_CONFIG.SALT_LENGTH));
+        // Reuse cached salt/key when available to avoid re-deriving PBKDF2
+        let salt, fileKey;
+        if (this.state.currentSalt && this.state.currentDerivedKey) {
+            salt = this.state.currentSalt;
+            fileKey = this.state.currentDerivedKey;
+        } else {
+            salt = crypto.getRandomValues(new Uint8Array(APP_CONFIG.SALT_LENGTH));
+            fileKey = await this.deriveKeyFromSalt(salt);
+            this.state.currentSalt = salt;
+            this.state.currentDerivedKey = fileKey;
+        }
+
         const iv = crypto.getRandomValues(new Uint8Array(APP_CONFIG.IV_LENGTH));
         
-        // 2. Derive the key specifically for this salt
-        const fileKey = await this.deriveKeyFromSalt(salt);
-        
-        // 3. Encrypt
+        // Encrypt
         const encodedText = new TextEncoder().encode(text);
         const cipher = await crypto.subtle.encrypt(
             { name: "AES-GCM", iv }, 
@@ -526,7 +522,7 @@ async encrypt(text) {
             encodedText
         );
 
-        // 4. Pack the binary: [Version][Salt][IV][Cipher]
+        // Pack the binary: [Version][Salt][IV][Cipher]
         const blob = new Uint8Array(1 + salt.length + iv.length + cipher.byteLength);
         blob[0] = APP_CONFIG.FILE_FORMAT_VERSION;
         blob.set(salt, 1);
@@ -613,7 +609,11 @@ async encrypt(text) {
             return;
         }
         const tx = this.state.db.transaction('handles', 'readwrite');
-        await tx.objectStore('handles').put(h, h.name);
+        await new Promise((resolve, reject) => {
+            const req = tx.objectStore('handles').put(h, h.name);
+            req.onsuccess = () => resolve();
+            req.onerror = () => reject(req.error);
+        });
         await this.renderList();
     },
 
@@ -685,10 +685,11 @@ async encrypt(text) {
     },
 
 async save() {
-    if (!this.state.currentHandle || !this.state.key || this.state.decryptionFailed) return;
+    if (!this.state.currentHandle || !this.state.key || this.state.decryptionFailed || this.state.syncInProgress) return;
 
     try {
         // LOCK: Tell the observer to ignore the upcoming disk event
+        clearTimeout(this.state._saveUnlockTimeout);
         this.state.syncInProgress = true; 
 
         const encryptedBytes = await this.encrypt(document.getElementById('editor').value);
@@ -712,7 +713,7 @@ async save() {
     } finally {
         // UNLOCK: Allow the observer to listen for external changes again
         // We use a small timeout to ensure the OS has finished flushing the write
-        setTimeout(() => { this.state.syncInProgress = false; }, 500);
+        this.state._saveUnlockTimeout = setTimeout(() => { this.state.syncInProgress = false; }, 500);
     }
 },
 
@@ -914,7 +915,11 @@ async save() {
         try {
             const backupKey = name + '::backup::' + Date.now();
             const tx = this.state.db.transaction('handles', 'readwrite');
-            tx.objectStore('handles').put({type: 'backup', name, content, ts: Date.now()}, backupKey);
+            await new Promise((resolve, reject) => {
+                const req = tx.objectStore('handles').put({type: 'backup', name, content, ts: Date.now()}, backupKey);
+                req.onsuccess = () => resolve();
+                req.onerror = () => reject(req.error);
+            });
             return true;
         } catch (e) { return false; }
     },
@@ -922,6 +927,7 @@ async save() {
     // --- SYNC ---
     async syncFromDisk() {
         if (!this.state.currentHandle || !this.state.key || this.state.syncInProgress || this.state.decryptionFailed) return;
+        clearTimeout(this.state._saveUnlockTimeout);
         this.state.syncInProgress = true;
         try {
             const now = Date.now();
@@ -1064,7 +1070,11 @@ async save() {
         }
         if (confirm(`Remove shortcut for "${name}"? The file remains on your disk.`)) {
             const tx = this.state.db.transaction('handles', 'readwrite');
-            await tx.objectStore('handles').delete(name);
+            await new Promise((resolve, reject) => {
+                const req = tx.objectStore('handles').delete(name);
+                req.onsuccess = () => resolve();
+                req.onerror = () => reject(req.error);
+            });
 
             if (this.state.currentHandle?.name === name) {
                 this.state.currentHandle = null;
