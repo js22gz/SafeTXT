@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="theme-color" content="#1a73e8">
+    <meta name="theme-color" content="#1e1e1e">
     <!-- CSP Note: 'unsafe-inline' is required due to single-file architecture.
          All code is static and controlled by the developer - no user-generated scripts. -->
     <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'self'; form-action 'self'; upgrade-insecure-requests">
@@ -12,13 +12,13 @@
     <link rel="manifest" href="manifest.json">
     <style>
         :root {
-            --bg: #ffffff; --sidebar-bg: #f8f9fa; --accent: #1a73e8;
-            --text-main: #202124; --text-sub: #5f6368; --border: #dadce0;
-            --danger: #d93025; --success: #1e8e3e;
+            --bg: #1e1e1e; --sidebar-bg: #252526; --accent: #ffffff;
+            --text-main: #e0e0e0; --text-sub: #a0a0a0; --border: #3c3c3c;
+            --danger: #e06060; --success: #4ec970;
         }
 
         * { box-sizing: border-box; }
-        body, html { margin: 0; padding: 0; height: 100%; font-family: 'Segoe UI', system-ui, sans-serif; color: var(--text-main); overflow: hidden; }
+        body, html { margin: 0; padding: 0; height: 100%; font-family: 'Segoe UI', system-ui, sans-serif; color: var(--text-main); background: var(--bg); overflow: hidden; }
 
         /* App Layout */
         #app-shell { display: grid; grid-template-columns: 300px 1fr; height: 100vh; transition: opacity 0.3s, filter 0.3s; }
@@ -32,58 +32,59 @@
             display: flex; justify-content: space-between; align-items: center;
             padding: 10px; border-radius: 6px; cursor: pointer; font-size: 14px; margin-bottom: 2px;
         }
-        .file-item:hover { background: #e8eaed; }
-        .file-item.active { background: #e8f0fe; color: var(--accent); font-weight: 600; }
-        .remove-btn { color: #ccc; font-size: 18px; padding: 0 5px; transition: color 0.2s; }
+        .file-item:hover { background: #333333; }
+        .file-item.active { background: #3c3c3c; color: #ffffff; font-weight: 600; }
+        .remove-btn { color: #666; font-size: 18px; padding: 0 5px; transition: color 0.2s; }
         .remove-btn:hover { color: var(--danger); }
 
         /* Main Stage */
         main { display: flex; flex-direction: column; background: var(--bg); position: relative; }
-        header { padding: 12px 24px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; background: white; z-index: 10; }
+        header { padding: 12px 24px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; background: var(--sidebar-bg); z-index: 10; }
         
         #editor { 
             flex-grow: 1; border: none; outline: none; padding: 40px; 
-            font-size: 18px; line-height: 1.6; resize: none; font-family: 'Georgia', serif; 
+            font-size: 18px; line-height: 1.6; resize: none; font-family: 'Georgia', serif;
+            background: var(--bg); color: var(--text-main);
         }
 
         /* Overlay & Cards */
-        .overlay { position: fixed; inset: 0; background: rgba(255,255,255,0.9); display: flex; align-items: center; justify-content: center; z-index: 1000; }
-        .card { background: white; padding: 40px; border-radius: 12px; box-shadow: 0 15px 35px rgba(0,0,0,0.1); border: 1px solid var(--border); width: 420px; text-align: center; }
+        .overlay { position: fixed; inset: 0; background: rgba(18,18,18,0.95); display: flex; align-items: center; justify-content: center; z-index: 1000; }
+        .card { background: #2d2d2d; padding: 40px; border-radius: 12px; box-shadow: 0 15px 35px rgba(0,0,0,0.4); border: 1px solid var(--border); width: 420px; text-align: center; color: var(--text-main); }
 
         /* UI Elements */
-        .btn { padding: 10px 16px; border-radius: 6px; border: 1px solid var(--border); cursor: pointer; font-size: 14px; font-weight: 500; display: inline-flex; align-items: center; justify-content: center; gap: 8px; }
-        .btn-primary { background: var(--accent); color: white; border: none; }
-        .btn-primary:hover { background: #1765cc; }
-        .btn-outline { background: white; color: var(--text-main); }
-        .btn-outline:hover { background: #f1f3f4; }
+        .btn { padding: 10px 16px; border-radius: 6px; border: 1px solid var(--border); cursor: pointer; font-size: 14px; font-weight: 500; display: inline-flex; align-items: center; justify-content: center; gap: 8px; background: var(--sidebar-bg); color: var(--text-main); }
+        .btn-primary { background: #ffffff; color: #1e1e1e; border: none; }
+        .btn-primary:hover { background: #e0e0e0; }
+        .btn-outline { background: var(--sidebar-bg); color: var(--text-main); }
+        .btn-outline:hover { background: #333333; }
         
-        .input-text { width: 100%; padding: 12px; border: 1px solid var(--border); border-radius: 6px; margin-bottom: 16px; font-size: 16px; outline-color: var(--accent); }
+        .input-text { width: 100%; padding: 12px; border: 1px solid var(--border); border-radius: 6px; margin-bottom: 16px; font-size: 16px; outline-color: #ffffff; background: #1e1e1e; color: var(--text-main); }
         .hidden { display: none !important; }
 
         /* Inactivity Warning */
         #inactivity-warning {
             position: fixed; bottom: 20px; right: 20px;
-            background: #fff3cd; border: 2px solid #ffc107; border-radius: 8px;
+            background: #3a3000; border: 2px solid #665500; border-radius: 8px;
             padding: 20px; z-index: 2000;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.4);
             min-width: 280px; animation: slideIn 0.3s ease-out;
         }
         @keyframes slideIn {
             from { transform: translateX(400px); opacity: 0; }
             to { transform: translateX(0); opacity: 1; }
         }
-        #inactivity-warning h3 { margin: 0 0 12px 0; color: #856404; font-size: 16px; }
-        #inactivity-warning p { margin: 0 0 12px 0; color: #856404; font-size: 14px; }
-        #inactivity-timer { font-size: 32px; font-weight: bold; color: #dc3545; text-align: center; margin: 12px 0; font-family: 'Courier New', monospace; }
+        #inactivity-warning h3 { margin: 0 0 12px 0; color: #e0c050; font-size: 16px; }
+        #inactivity-warning p { margin: 0 0 12px 0; color: #c0a040; font-size: 14px; }
+        #inactivity-timer { font-size: 32px; font-weight: bold; color: #e06060; text-align: center; margin: 12px 0; font-family: 'Courier New', monospace; }
         #inactivity-warning .btn { width: 100%; padding: 10px; margin-top: 12px; }
 
         /* Toast notification */
         #toast {
             position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
-            background: #323232; color: #fff; padding: 12px 24px; border-radius: 8px;
+            background: #3c3c3c; color: #fff; padding: 12px 24px; border-radius: 8px;
             font-size: 14px; z-index: 3000; opacity: 0; transition: opacity 0.4s;
             pointer-events: none; max-width: 480px; text-align: center;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.4);
         }
         #toast.show { opacity: 1; pointer-events: auto; }
     </style>
@@ -119,7 +120,7 @@
         
         <div id="file-list"></div>
 
-        <button class="btn btn-outline" style="margin-top:auto; border-color: #f5c2c7; color: var(--danger)" onclick="App.lock()">🔒 Lock & Clear Session</button>
+        <button class="btn btn-outline" style="margin-top:auto; border-color: #5a2020; color: var(--danger)" onclick="App.lock()">🔒 Lock & Clear Session</button>
     </aside>
 
     <main>
@@ -137,7 +138,7 @@
             <p>Your session will lock in:</p>
             <div id="inactivity-timer">0:30</div>
             <button class="btn btn-primary" onclick="App.inactivityManager.resetTimer()">I'm Still Here</button>
-            <p style="font-size: 12px; margin-top: 12px; color: #856404;">No action in 10 minutes will lock your session for security.</p>
+            <p style="font-size: 12px; margin-top: 12px; color: #c0a040;">No action in 10 minutes will lock your session for security.</p>
         </div>
     </main>
 </div>
