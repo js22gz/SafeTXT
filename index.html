@@ -419,6 +419,8 @@ async unlock() {
             this.state.passInputKeypressHandler = null;
         }
         // Stronger wipe: overwrite editor and base content thoroughly
+        // Note: JavaScript strings are immutable; this is a best-effort defense-in-depth.
+        // The engine may not guarantee physical memory zeroing, but it reduces window of exposure.
         if (editor) {
             editor.value = '\0'.repeat(editor.value.length);
             editor.value = '';
@@ -654,7 +656,9 @@ async unlock() {
         if (!this.state.sessionUuidBytes) return false;
         return this._constantTimeEqual(lockInfo.uuidBytes, this.state.sessionUuidBytes);
     },
-    /** Constant-time comparison of two Uint8Arrays to prevent timing attacks. */
+    /** Constant-time comparison of two Uint8Arrays to prevent timing attacks.
+     *  Note: JS engines may optimize this; this is best-effort for browser environments
+     *  where crypto.subtle.timingSafeEqual is not yet available. */
     _constantTimeEqual(a, b) {
         if (a.length !== b.length) return false;
         let diff = 0;
