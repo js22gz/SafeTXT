@@ -142,37 +142,29 @@
 
 <script>
 const APP_CONFIG = {
-    VERSION: '1.1',
+    VERSION: '1.2', // Bumped for lock changes
     FILE_FORMAT_VERSION: 0x01,
     SALT_LENGTH: 16,
     IV_LENGTH: 12,
     GCM_TAG_LENGTH: 16,
     PBKDF2_ITERATIONS: 600000,
-    OBSERVER_DEBOUNCE_MS: 250,
     DIGEST_THROTTLE_MS: 15000, // throttle digest hashing to reduce shared-drive I/O
-    POLL_INTERVAL_MS: 5000,   // fallback polling interval when FileSystemObserver is unavailable
-    REMOTE_ACTIVE_WINDOW_MS: 30000, // window to detect frequent remote edits (30s)
-    REMOTE_ACTIVE_THRESHOLD: 2,     // number of remote syncs within window to trigger read-only
-    REMOTE_IDLE_MS: 30000,          // time without remote changes before restoring write access
     AUTO_SAVE_DELAY_MS: 1000,
     INACTIVITY_TIMEOUT_MS: 10 * 60 * 1000,
     MAX_FILE_SIZE_MB: 100, // Maximum file size in megabytes
     DB_NAME: 'LocalNote_v2026', // preserve original name so existing users keep their file handles
-    DB_VERSION: 1,
+    DB_VERSION: 2,
+    LOCK_SUFFIX: '.lock',
+    LOCK_STALE_MS: 15 * 60 * 1000,    // 15 min
+    LOCK_POLL_MS: 10000,              // 10 s poll for lock status
+    LOCK_POLL_DEBOUNCE_MS: 500,
 };
-
 const App = {
 state: {
     db: null,
     key: null,
     currentHandle: null,
-    fileObserver: null,
-    fileObserverTimeout: null,
-    pollInterval: null,
     syncInProgress: false,
-    remoteSyncTimestamps: [],
-    remoteReadOnly: false,
-    remoteIdleTimeout: null,
     lastMTime: 0,
     lastDigest: null,
     lastDigestCheck: 0,
@@ -184,73 +176,51 @@ state: {
     fileListClickHandler: null,
     fileListKeydownHandler: null,
     editorInputHandler: null,
-    passInputKeypressHandler: null
+    passInputKeypressHandler: null,
+    sessionId: null,
+    currentLockHandle: null,
+    lockPollInterval: null,
 },
-
     _toastTimer: null,
-
     _wipeBytes(arr) {
         if (arr instanceof Uint8Array) arr.fill(0);
     },
-
     _setBaseContent(bytes) {
         if (this.state.baseContent instanceof Uint8Array && this.state.baseContent !== bytes) {
             this.state.baseContent.fill(0);
         }
         this.state.baseContent = bytes;
     },
-
-    _setRemoteReadOnly(readOnly) {
-        if (this.state.remoteReadOnly === readOnly) return;
-        this.state.remoteReadOnly = readOnly;
+    _setReadOnlyDueToLock(readOnly, reason = '') {
+        if (this.state.decryptionFailed) readOnly = true; // Override if failed decrypt
         const editor = document.getElementById('editor');
         const status = document.getElementById('save-status');
         if (readOnly) {
             editor.disabled = true;
             clearTimeout(this.state.saveTimeout);
-            status.textContent = '👁️ Read-only — file in use by another session';
-            this.showToast('File is being edited remotely — read-only mode', 5000);
+            status.textContent = `👁️ Locked by ${reason || 'another session'} – read-only`;
+            this.showToast('File is locked by another session', 5000);
         } else {
-            if (!this.state.decryptionFailed && this.state.key) {
-                editor.disabled = false;
-            }
-            status.textContent = '✓ File idle — editing enabled';
+            if (!this.state.decryptionFailed && this.state.key) editor.disabled = false;
+            status.textContent = 'Editing enabled';
         }
     },
-
-    _trackRemoteSync() {
-        const now = Date.now();
-        this.state.remoteSyncTimestamps.push(now);
-        // Keep only timestamps within the detection window
-        const cutoff = now - APP_CONFIG.REMOTE_ACTIVE_WINDOW_MS;
-        this.state.remoteSyncTimestamps = this.state.remoteSyncTimestamps.filter(t => t >= cutoff);
-
-        if (this.state.remoteSyncTimestamps.length >= APP_CONFIG.REMOTE_ACTIVE_THRESHOLD) {
-            this._setRemoteReadOnly(true);
-        }
-
-        // Reset idle timer — restore write access after no remote changes for REMOTE_IDLE_MS
-        clearTimeout(this.state.remoteIdleTimeout);
-        this.state.remoteIdleTimeout = setTimeout(() => {
-            this._setRemoteReadOnly(false);
-        }, APP_CONFIG.REMOTE_IDLE_MS);
-    },
-
     async init() {
         this.setupEditorHandler();
         this.setupPassInputHandler();
-
         try {
             this.state.db = await new Promise((resolve, reject) => {
                 const req = indexedDB.open(APP_CONFIG.DB_NAME, APP_CONFIG.DB_VERSION);
                 req.onupgradeneeded = (e) => {
                     const db = e.target.result;
                     if (!db.objectStoreNames.contains('handles')) db.createObjectStore('handles');
+                    if (e.oldVersion < 2 && !db.objectStoreNames.contains('locks')) {
+                        db.createObjectStore('locks');
+                    }
                 };
                 req.onsuccess = () => resolve(req.result);
                 req.onerror = () => reject(req.error);
             });
-
             this.setupFileListHandlers();
             await this.renderList();
             this.setupServiceWorker();
@@ -259,7 +229,6 @@ state: {
             this.state.db = null;
         }
     },
-
     setupEditorHandler() {
         this.state.editorInputHandler = () => {
             if (this.state.decryptionFailed) return;
@@ -270,66 +239,12 @@ state: {
         };
         document.getElementById('editor').oninput = this.state.editorInputHandler;
     },
-
     setupPassInputHandler() {
         this.state.passInputKeypressHandler = (e) => {
             if (e.key === 'Enter') this.unlock();
         };
         document.getElementById('pass-input').addEventListener('keypress', this.state.passInputKeypressHandler);
     },
-
-    teardownFileObserver() {
-        if (this.state.fileObserver?.disconnect) this.state.fileObserver.disconnect();
-        this.state.fileObserver = null;
-        clearTimeout(this.state.fileObserverTimeout);
-        this.state.fileObserverTimeout = null;
-        clearInterval(this.state.pollInterval);
-        this.state.pollInterval = null;
-        clearTimeout(this.state.remoteIdleTimeout);
-        this.state.remoteIdleTimeout = null;
-        this.state.remoteSyncTimestamps = [];
-        this._setRemoteReadOnly(false);
-    },
-
-async setupFileObserver(handle) {
-    if (!handle) return;
-    this.teardownFileObserver();
-    
-    let observerActive = false;
-    if ('FileSystemObserver' in window) {
-        try {
-            const observer = new FileSystemObserver((records) => {
-                // IGNORE if we are currently saving or if this is a "metadata-only" change
-                if (this.state.syncInProgress) return;
-                
-                clearTimeout(this.state.fileObserverTimeout);
-                this.state.fileObserverTimeout = setTimeout(() => {
-                    // Double check flag inside the debounce
-                    if (this.state.syncInProgress) return; 
-                    void this.syncFromDisk();
-                }, APP_CONFIG.OBSERVER_DEBOUNCE_MS);
-            });
-            
-            this.state.fileObserver = observer;
-            await observer.observe(handle);
-            observerActive = true;
-        } catch (e) {
-                this.teardownFileObserver();
-                const reason = e?.name || 'unknown';
-                console.warn(`FileSystemObserver setup failed (${reason}); falling back to polling.`, e);
-            }
-        }
-    
-    // Fallback: poll for changes when FileSystemObserver is unavailable or failed
-    if (!observerActive) {
-        this.state.pollInterval = setInterval(() => {
-            if (!this.state.syncInProgress) {
-                void this.syncFromDisk();
-            }
-        }, APP_CONFIG.POLL_INTERVAL_MS);
-    }
-},
-
     setupServiceWorker() {
         if ('serviceWorker' in navigator) {
             navigator.serviceWorker.register('./sw.js')
@@ -337,10 +252,8 @@ async setupFileObserver(handle) {
                 .catch((error) => console.warn('Service Worker registration failed:', error));
         }
     },
-
     setupFileListHandlers() {
         const fileList = document.getElementById('file-list');
-
         // Remove old handlers if they exist to prevent duplicate listeners
         if (this.state.fileListClickHandler) {
             fileList.removeEventListener('click', this.state.fileListClickHandler);
@@ -348,7 +261,6 @@ async setupFileObserver(handle) {
         if (this.state.fileListKeydownHandler) {
             fileList.removeEventListener('keydown', this.state.fileListKeydownHandler);
         }
-
         // Store handlers for later cleanup
         this.state.fileListClickHandler = (e) => {
             const removeBtn = e.target.closest('.remove-btn');
@@ -364,11 +276,9 @@ async setupFileObserver(handle) {
                 req.onsuccess = () => { if (req.result) this.loadFile(req.result); };
             }
         };
-
         this.state.fileListKeydownHandler = (e) => {
             const item = e.target.closest('.file-item');
             if (!item || !this.state.db) return;
-
             if (e.key === 'Enter' || e.key === ' ') {
                 e.preventDefault();
                 const tx = this.state.db.transaction('handles');
@@ -379,11 +289,9 @@ async setupFileObserver(handle) {
                 this.removeHandle(e, item.getAttribute('data-filename'));
             }
         };
-
         fileList.addEventListener('click', this.state.fileListClickHandler);
         fileList.addEventListener('keydown', this.state.fileListKeydownHandler);
     },
-
     cleanupFileListHandlers() {
         const fileList = document.getElementById('file-list');
         if (!fileList) return;
@@ -397,7 +305,6 @@ async setupFileObserver(handle) {
             this.state.fileListKeydownHandler = null;
         }
     },
-
     // --- INACTIVITY TIMER ---
     inactivityManager: {
         INACTIVITY_THRESHOLD: APP_CONFIG.INACTIVITY_TIMEOUT_MS,
@@ -406,7 +313,6 @@ async setupFileObserver(handle) {
         warningTimer: null,
         warningCountdown: null,
         eventListeners: [],
-
         init() {
             const events = ['mousedown', 'mousemove', 'keypress', 'scroll', 'touchstart', 'click'];
             const handler = () => this.resetTimer();
@@ -416,19 +322,16 @@ async setupFileObserver(handle) {
             });
             this.resetTimer();
         },
-
         resetTimer() {
             clearTimeout(this.inactivityTimer);
             clearTimeout(this.warningTimer);
             clearInterval(this.warningCountdown);
             this.hideWarning();
-
             this.inactivityTimer = setTimeout(() => this.showWarning(),
                 this.INACTIVITY_THRESHOLD - this.WARNING_SECONDS * 1000);
             this.warningTimer = setTimeout(() => this.lockSession(),
                 this.INACTIVITY_THRESHOLD);
         },
-
         showWarning() {
             const el = document.getElementById('inactivity-warning');
             el.classList.remove('hidden');
@@ -441,17 +344,14 @@ async setupFileObserver(handle) {
                 if (seconds <= 0) clearInterval(this.warningCountdown);
             }, 1000);
         },
-
         hideWarning() {
             document.getElementById('inactivity-warning').classList.add('hidden');
             clearInterval(this.warningCountdown);
         },
-
         lockSession() {
             this.hideWarning();
             App.lock(true);
         },
-
         cleanup() {
             clearTimeout(this.inactivityTimer);
             clearTimeout(this.warningTimer);
@@ -464,50 +364,49 @@ async setupFileObserver(handle) {
             this.eventListeners = [];
         }
     },
-
     // --- SESSION CONTROL ---
-async unlock() {
-    const inputEl = document.getElementById('pass-input');
-    const pass = inputEl.value;
-    
-    if (!pass || pass.length < 12) {
-        alert("Password must be at least 12 characters for security.");
-        return;
-    }
-    
-    // Encode password to Uint8Array so we can wipe it after use
-    const passBytes = new TextEncoder().encode(pass);
-    
-    try {
-        this.state.key = await crypto.subtle.importKey(
-            "raw", passBytes, "PBKDF2", false, ["deriveKey"]
-        );
+    async unlock() {
+        const inputEl = document.getElementById('pass-input');
+        const pass = inputEl.value;
         
-        passBytes.fill(0);
-        inputEl.value = "";
-        document.getElementById('unlock-overlay').classList.add('hidden');
-        document.getElementById('app-shell').classList.remove('blur');
-        document.getElementById('editor').disabled = false;
-        document.getElementById('save-status').textContent = "Session Active";
-        this.updateSaveButtonLabel();
-        this.inactivityManager.init();
-    } catch (e) {
-        passBytes.fill(0);
-        console.error('Unlock failed:', e);
-        alert('Failed to initialize session. Please try again.');
-        this.state.key = null;
-    }
-},
+        if (!pass || pass.length < 12) {
+            alert("Password must be at least 12 characters for security.");
+            return;
+        }
+        
+        // Encode password to Uint8Array so we can wipe it after use
+        const passBytes = new TextEncoder().encode(pass);
+        
+        try {
+            this.state.key = await crypto.subtle.importKey(
+                "raw", passBytes, "PBKDF2", false, ["deriveKey"]
+            );
+            
+            passBytes.fill(0);
+            inputEl.value = "";
+            document.getElementById('unlock-overlay').classList.add('hidden');
+            document.getElementById('app-shell').classList.remove('blur');
+            document.getElementById('editor').disabled = false;
+            document.getElementById('save-status').textContent = "Session Active";
+            this.updateSaveButtonLabel();
+            this.inactivityManager.init();
+            this.state.sessionId = crypto.randomUUID();
+        } catch (e) {
+            passBytes.fill(0);
+            console.error('Unlock failed:', e);
+            alert('Failed to initialize session. Please try again.');
+            this.state.key = null;
+        }
+    },
     async lock(force = false) {
         if (!force && !confirm("Lock session? You will need to re-enter your key to view notes.")) return;
         clearTimeout(this.state.saveTimeout);
-        clearTimeout(this.state._saveUnlockTimeout);
-        clearTimeout(this._toastTimer);
-        this._toastTimer = null;
         this.inactivityManager.cleanup();
-
         // Clean up event listeners to prevent memory leaks
         this.cleanupFileListHandlers();
+        
+        await this.releaseCurrentLock();
+        this.teardownLockPoller();
         
         // Remove editor input handler
         const editor = document.getElementById('editor');
@@ -521,7 +420,6 @@ async unlock() {
             passInput.removeEventListener('keypress', this.state.passInputKeypressHandler);
             this.state.passInputKeypressHandler = null;
         }
-
         // Clear sensitive data from memory before reload.
         // Uint8Array buffers are mutable and can be wiped in-place,
         // unlike JS strings which are immutable and persist until GC.
@@ -539,14 +437,11 @@ async unlock() {
         this.state.key = null;
         this.state.currentHandle = null;
         this.updateSaveButtonLabel();
-        this.teardownFileObserver();
         this.state.isDirty = false;
         this.state.lastMTime = 0;
         this.state.lastDigest = null;
         this.state.lastDigestCheck = 0;
-
         if (this.state.db) { this.state.db.close(); this.state.db = null; }
-
         // Instruct service worker to purge cached app content with timeout
         try {
             if (navigator.serviceWorker && navigator.serviceWorker.controller) {
@@ -555,20 +450,16 @@ async unlock() {
         } catch (e) {
             console.warn('Failed to send clear cache message to service worker:', e);
         }
-
         location.reload();
     },
-
     togglePass() {
         const el = document.getElementById('pass-input');
         el.type = el.type === 'password' ? 'text' : 'password';
     },
-
     // --- CRYPTO ENGINE ---
     async deriveKeyFromSalt(salt) {
         if (!this.state.key) throw new Error("Session locked");
         if (!salt) throw new Error("Salt is required for key derivation.");
-
         return crypto.subtle.deriveKey(
             {
                 name: "PBKDF2",
@@ -585,13 +476,10 @@ async unlock() {
         
 async encrypt(plainBytes) {
         if (!this.state.key) throw new Error('Unlock session first.');
-
         // Always generate a fresh random salt per encryption operation
         const salt = crypto.getRandomValues(new Uint8Array(APP_CONFIG.SALT_LENGTH));
         const fileKey = await this.deriveKeyFromSalt(salt);
-
         const iv = crypto.getRandomValues(new Uint8Array(APP_CONFIG.IV_LENGTH));
-
         // Build metadata buffer [Version][Salt][IV] for GCM additional authenticated data
         const metadata = new Uint8Array(1 + salt.length + iv.length);
         metadata[0] = APP_CONFIG.FILE_FORMAT_VERSION;
@@ -604,7 +492,6 @@ async encrypt(plainBytes) {
             fileKey, 
             plainBytes
         );
-
         // Pack the binary: [Version][Salt][IV][Cipher]
         const blob = new Uint8Array(metadata.length + cipher.byteLength);
         blob.set(metadata);
@@ -612,12 +499,10 @@ async encrypt(plainBytes) {
         
         return blob;
     },
-
     async computeDigest(buffer) {
         const hash = await crypto.subtle.digest('SHA-256', buffer);
         return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('');
     },
-
     // --- FILE OPERATIONS ---
     async createNote() {
         try {
@@ -625,14 +510,12 @@ async encrypt(plainBytes) {
                 suggestedName: 'untitled.txt',
                 types: [{ accept: {'text/plain': ['.txt']} }]
             });
-
             if (this.state.key) {
                 const blob = await this.encrypt(new Uint8Array(0));
                 const stream = await h.createWritable();
                 await stream.write(blob);
                 await stream.close();
             }
-
             await this.persistHandle(h);
             await this.loadFile(h);
             document.getElementById('save-status').textContent = "✓ New note created";
@@ -642,7 +525,6 @@ async encrypt(plainBytes) {
             }
         }
     },
-
     async importNote() {
         try {
             const [h] = await window.showOpenFilePicker();
@@ -655,7 +537,6 @@ async encrypt(plainBytes) {
             }
         }
     },
-
     async persistHandle(h) {
         if (!this.state.db) {
             console.error('Database not initialized');
@@ -671,7 +552,6 @@ async encrypt(plainBytes) {
         });
         await this.renderList();
     },
-
     async getHandlesFromDB() {
         if (!this.state.db) return [];
         return new Promise((resolve, reject) => {
@@ -683,7 +563,6 @@ async encrypt(plainBytes) {
             req.onerror = () => reject(req.error);
         });
     },
-
     async loadFile(h) {
         try {
             if (await h.queryPermission({mode: 'readwrite'}) !== 'granted') {
@@ -692,7 +571,11 @@ async encrypt(plainBytes) {
                     return;
                 }
             }
-
+            const fileName = h.name;
+            // Acquire lock (prompts only on first use per file)
+            const canWrite = await this.acquireLock(h, fileName);
+            this.state.currentHandle = h;
+            this.updateSaveButtonLabel();
             const file = await h.getFile();
             
             // Check file size to prevent OOM
@@ -705,77 +588,65 @@ async encrypt(plainBytes) {
             
             const buffer = await file.arrayBuffer();
             const digest = await this.computeDigest(buffer);
-
-            this.state.currentHandle = h;
-            this.updateSaveButtonLabel();
             this.state.lastMTime = file.lastModified;
             this.state.lastDigest = digest;
             this.state.lastDigestCheck = Date.now();
             this.state.isDirty = false;
-            this.state.remoteSyncTimestamps = [];
-            this.state.remoteReadOnly = false;
-            clearTimeout(this.state.remoteIdleTimeout);
-                        
+            this.state.decryptionFailed = false;
+            
             const result = await this.getDecryptedText(new Uint8Array(buffer));
             const editor = document.getElementById('editor');
             if (result.success) {
-              this.state.decryptionFailed = false;
-              editor.disabled = false;
-              editor.value = new TextDecoder().decode(result.plainBytes);
-              this._setBaseContent(result.plainBytes);
-              document.getElementById('save-status').textContent = "Loaded from disk";
+                this.state.decryptionFailed = false;
+                editor.value = new TextDecoder().decode(result.plainBytes);
+                this._setBaseContent(result.plainBytes);
+                document.getElementById('save-status').textContent = "Loaded from disk";
             } else {
-              this.state.decryptionFailed = true;
-              editor.value = result.errorMessage;
-              editor.disabled = true;
-              this._setBaseContent(null);
-              document.getElementById('save-status').textContent = "⚠️ Decryption failed — editing disabled";
+                this.state.decryptionFailed = true;
+                editor.value = result.errorMessage;
+                this._setBaseContent(null);
+                document.getElementById('save-status').textContent = "⚠️ Decryption failed — editing disabled";
             }
+            this._setReadOnlyDueToLock(!canWrite);
             // Use textContent to prevent XSS
             document.getElementById('active-filename').textContent = h.name;
             await this.renderList();
-            await this.setupFileObserver(h);
+            await this.setupLockPoller();
         } catch (e) {
             console.error('Error loading file:', e);
             document.getElementById('save-status').textContent = "⚠️ Error loading file";
             alert(`Failed to load file: ${e.message || 'Unknown error'}`);
         }
     },
-
-async save() {
-    if (!this.state.currentHandle || !this.state.key || this.state.decryptionFailed || this.state.syncInProgress || this.state.remoteReadOnly) return;
-
-    try {
-        // LOCK: Tell the observer to ignore the upcoming disk event
-        clearTimeout(this.state._saveUnlockTimeout);
-        this.state.syncInProgress = true; 
-
-        const plainBytes = new TextEncoder().encode(document.getElementById('editor').value);
-        const encryptedBytes = await this.encrypt(plainBytes);
-        const stream = await this.state.currentHandle.createWritable();
-        await stream.write(encryptedBytes);
-        await stream.close();
-
-        // Update local metadata so we know what the "latest" version looks like
-        const digest = await this.computeDigest(encryptedBytes);
-        const f = await this.state.currentHandle.getFile();
-        this.state.lastMTime = f.lastModified;
-        this.state.lastDigest = digest;
-        this.state.lastDigestCheck = Date.now();
-        this.state.isDirty = false;
-        this._setBaseContent(plainBytes);
-        
-        document.getElementById('save-status').textContent = "✓ Encrypted & Saved";
-    } catch (e) {
-        console.error('Error saving file:', e);
-        document.getElementById('save-status').textContent = "⚠️ Error Saving";
-    } finally {
-        // UNLOCK: Allow the observer to listen for external changes again
-        // We use a small timeout to ensure the OS has finished flushing the write
-        this.state._saveUnlockTimeout = setTimeout(() => { this.state.syncInProgress = false; }, 500);
-    }
-},
-
+    async save() {
+        if (!this.state.currentHandle || !this.state.key || this.state.decryptionFailed || this.state.syncInProgress) return;
+        try {
+            // LOCK: Tell the observer to ignore the upcoming disk event
+            this.state.syncInProgress = true; 
+            const plainBytes = new TextEncoder().encode(document.getElementById('editor').value);
+            const encryptedBytes = await this.encrypt(plainBytes);
+            const stream = await this.state.currentHandle.createWritable();
+            await stream.write(encryptedBytes);
+            await stream.close();
+            // Update local metadata so we know what the "latest" version looks like
+            const digest = await this.computeDigest(encryptedBytes);
+            const f = await this.state.currentHandle.getFile();
+            this.state.lastMTime = f.lastModified;
+            this.state.lastDigest = digest;
+            this.state.lastDigestCheck = Date.now();
+            this.state.isDirty = false;
+            this._setBaseContent(plainBytes);
+            
+            document.getElementById('save-status').textContent = "✓ Encrypted & Saved";
+        } catch (e) {
+            console.error('Error saving file:', e);
+            document.getElementById('save-status').textContent = "⚠️ Error Saving";
+        } finally {
+            // UNLOCK: Allow the observer to listen for external changes again
+            // We use a small timeout to ensure the OS has finished flushing the write
+            setTimeout(() => { this.state.syncInProgress = false; }, 500);
+        }
+    },
     
     async saveOrSaveAs() {
         if (!this.state.key) {
@@ -786,7 +657,6 @@ async save() {
             document.getElementById('save-status').textContent = "⚠️ Cannot save — file not decrypted";
             return;
         }
-
         if (this.state.currentHandle) {
             // File already exists, just save
             await this.save();
@@ -795,7 +665,6 @@ async save() {
             await this.createNote();
         }
     },
-
     async refreshFile() {
         if (!this.state.currentHandle || !this.state.key) {
             document.getElementById('save-status').textContent = "⚠️ No file to refresh";
@@ -805,19 +674,20 @@ async save() {
             document.getElementById('save-status').textContent = "⚠️ Cannot refresh — file not decrypted";
             return;
         }
-
-        document.getElementById('save-status').textContent = "🔄 Checking for updates...";
-        
-        // Manually trigger syncFromDisk to check for remote changes
-        await this.syncFromDisk();
-        
-        // If syncFromDisk updated the status, keep that message; otherwise, indicate no changes
-        const statusAfter = document.getElementById('save-status').textContent;
-        if (statusAfter === "🔄 Checking for updates...") {
-            document.getElementById('save-status').textContent = "✓ File is up to date";
+        document.getElementById('save-status').textContent = "🔄 Refreshing from disk...";
+        // Reload the file content
+        const file = await this.state.currentHandle.getFile();
+        const buffer = await file.arrayBuffer();
+        const result = await this.getDecryptedText(new Uint8Array(buffer));
+        if (result.success) {
+            document.getElementById('editor').value = new TextDecoder().decode(result.plainBytes);
+            this._setBaseContent(result.plainBytes);
+            this.state.isDirty = false;
+            document.getElementById('save-status').textContent = "✓ Refreshed from disk";
+        } else {
+            document.getElementById('save-status').textContent = "⚠️ Refresh failed — decryption error";
         }
     },
-
     updateSaveButtonLabel() {
         const saveBtn = document.getElementById('save-btn');
         if (saveBtn) {
@@ -830,7 +700,175 @@ async save() {
             }
         }
     },
+    // --- LOCK HELPERS ---
+    async getLockHandle(fileName) {
+        if (!this.state.db) return null;
+        return new Promise((resolve) => {
+            const tx = this.state.db.transaction('locks', 'readonly');
+            const req = tx.objectStore('locks').get(fileName);
+            req.onsuccess = () => resolve(req.result || null);
+            req.onerror = () => resolve(null);
+        });
+    },
 
+    async persistLock(fileName, lockHandle) {
+        if (!this.state.db) return;
+        const tx = this.state.db.transaction('locks', 'readwrite');
+        await new Promise((resolve, reject) => {
+            tx.onerror = () => reject(tx.error);
+            const req = tx.objectStore('locks').put(lockHandle, fileName);
+            req.onsuccess = () => resolve();
+        });
+    },
+
+    async deleteLockEntry(fileName) {
+        if (!this.state.db) return;
+        const tx = this.state.db.transaction('locks', 'readwrite');
+        await new Promise((resolve) => {
+            const req = tx.objectStore('locks').delete(fileName);
+            req.onsuccess = () => resolve();
+        });
+    },
+
+    async createLockFile(suggestedName) {
+        return window.showSaveFilePicker({
+            suggestedName,
+            types: [{ description: 'Lock file', accept: { 'application/json': ['.lock'] } }]
+        });
+    },
+
+    async writeLockData(lockHandle, data) {
+        const stream = await lockHandle.createWritable();
+        await stream.write(JSON.stringify(data));
+        await stream.close();
+    },
+
+    async checkLockStatus(lockHandle) {
+        try {
+            const file = await lockHandle.getFile();
+            const text = await file.text();
+            const data = JSON.parse(text);
+            const age = Date.now() - (data.timestamp || 0);
+
+            if (data.released || age > APP_CONFIG.LOCK_STALE_MS) {
+                return { available: true };
+            }
+            if (data.sessionId === this.state.sessionId) {
+                return { owned: true, timestamp: data.timestamp };
+            }
+            return { owned: false, ownerHint: data.sessionId ? 'another session' : 'unknown' };
+        } catch (e) {
+            return { exists: false };
+        }
+    },
+
+    async keepAliveLock(lockHandle) {
+        const data = {
+            sessionId: this.state.sessionId,
+            timestamp: Date.now(),
+            released: false
+        };
+        await this.writeLockData(lockHandle, data);
+    },
+
+    async releaseLock(lockHandle) {
+        if (!lockHandle) return;
+        try {
+            const data = {
+                sessionId: this.state.sessionId,
+                timestamp: 0,
+                released: true
+            };
+            await this.writeLockData(lockHandle, data);
+        } catch (e) {
+            console.warn('Failed to release lock (normal on abrupt close):', e);
+        }
+    },
+
+    async acquireLock(fileHandle, fileName) {
+        // Check stored lock first
+        let lockH = await this.getLockHandle(fileName);
+        if (lockH) {
+            const status = await this.checkLockStatus(lockH);
+            if (status.owned) {
+                await this.keepAliveLock(lockH);
+                this.state.currentLockHandle = lockH;
+                return true; // writable
+            } else if (status.available) {
+                // Reclaim stale/released lock
+                await this.writeLockData(lockH, {
+                    sessionId: this.state.sessionId,
+                    timestamp: Date.now(),
+                    released: false
+                });
+                this.state.currentLockHandle = lockH;
+                return true;
+            } else {
+                // Locked by other
+                this.state.currentLockHandle = lockH; // Still poll it
+                return false;
+            }
+        }
+
+        // First-time: prompt user to create lock file in same folder
+        try {
+            lockH = await this.createLockFile(fileName + APP_CONFIG.LOCK_SUFFIX);
+            await this.writeLockData(lockH, {
+                sessionId: this.state.sessionId,
+                timestamp: Date.now(),
+                released: false
+            });
+            await this.persistLock(fileName, lockH);
+            this.state.currentLockHandle = lockH;
+            this.showToast('Lock file created – only you can edit');
+            return true;
+        } catch (e) {
+            if (e.name !== 'AbortError') console.error('Lock creation failed:', e);
+            this._setReadOnlyDueToLock(true, 'lock creation aborted');
+            return false;
+        }
+    },
+    async releaseCurrentLock() {
+        if (this.state.currentLockHandle) {
+            await this.releaseLock(this.state.currentLockHandle);
+            this.state.currentLockHandle = null;
+        }
+    },
+    setupLockPoller() {
+        this.teardownLockPoller();
+        if (!this.state.currentLockHandle) return;
+        this.state.lockPollInterval = setInterval(async () => {
+            if (!this.state.currentLockHandle || this.state.syncInProgress) return;
+            const status = await this.checkLockStatus(this.state.currentLockHandle);
+            if (status.owned) {
+                await this.keepAliveLock(this.state.currentLockHandle);
+                this._setReadOnlyDueToLock(false);
+            } else if (status.available) {
+                // Auto-reclaim if stale during poll
+                await this.writeLockData(this.state.currentLockHandle, {
+                    sessionId: this.state.sessionId,
+                    timestamp: Date.now(),
+                    released: false
+                });
+                this._setReadOnlyDueToLock(false);
+            } else {
+                this._setReadOnlyDueToLock(true, status.ownerHint || 'another session');
+                // Optional: auto-backup if dirty
+                if (this.state.isDirty) {
+                    await this._storeBackup(this.state.currentHandle.name, document.getElementById('editor').value);
+                    this.showToast('Edits backed up – file now locked remotely');
+                    this.state.isDirty = false;
+                }
+            }
+        }, APP_CONFIG.LOCK_POLL_MS);
+    },
+
+    teardownLockPoller() {
+        if (this.state.lockPollInterval) {
+            clearInterval(this.state.lockPollInterval);
+            this.state.lockPollInterval = null;
+        }
+    },
     // --- DIFF / MERGE ---
     /**
      * Compute longest common subsequence length table for two arrays.
@@ -843,7 +881,6 @@ async save() {
                 dp[i][j] = a[i - 1] === b[j - 1] ? dp[i - 1][j - 1] + 1 : Math.max(dp[i - 1][j], dp[i][j - 1]);
         return dp;
     },
-
     /**
      * Line-based three-way merge. Returns {merged, hasConflict}.
      * base/local/remote are strings. Splits on newlines and merges.
@@ -852,7 +889,6 @@ async save() {
         const bLines = base.split('\n');
         const lLines = local.split('\n');
         const rLines = remote.split('\n');
-
         // Build diff hunks from base→child using LCS back-trace
         const diffHunks = (base, child) => {
             const dp = this._lcsTable(base, child);
@@ -873,22 +909,18 @@ async save() {
             if (bi < base.length || ci < child.length) hunks.push({baseStart: bi, baseEnd: base.length, childStart: ci, childEnd: child.length});
             return hunks;
         };
-
         const lHunks = diffHunks(bLines, lLines);
         const rHunks = diffHunks(bLines, rLines);
-
         // Build a map of base line ranges changed by each side
         const touchedByL = new Set();
         const touchedByR = new Set();
         for (const h of lHunks) for (let k = h.baseStart; k < h.baseEnd; k++) touchedByL.add(k);
         for (const h of rHunks) for (let k = h.baseStart; k < h.baseEnd; k++) touchedByR.add(k);
-
         // Check for overlapping changes (conflicts)
         let hasConflict = false;
         for (const line of touchedByL) {
             if (touchedByR.has(line)) { hasConflict = true; break; }
         }
-
         if (!hasConflict) {
             // Non-conflicting: apply remote hunks to local (local is our working copy)
             // Rebuild from base, preferring local changes where local changed, remote where remote changed, base otherwise
@@ -898,7 +930,6 @@ async save() {
             const rMap = new Map();
             for (const h of lHunks) lMap.set(h.baseStart, h);
             for (const h of rHunks) rMap.set(h.baseStart, h);
-
             while (bi < bLines.length) {
                 if (lMap.has(bi)) {
                     const h = lMap.get(bi);
@@ -922,13 +953,11 @@ async save() {
             }
             return {merged: result.join('\n'), hasConflict: false};
         }
-
         // Conflict: produce annotated output with pre-indexed hunks for O(n)
         const lIdx = new Map();
         const rIdx = new Map();
         for (const h of lHunks) for (let k = h.baseStart; k < h.baseEnd; k++) lIdx.set(k, h);
         for (const h of rHunks) for (let k = h.baseStart; k < h.baseEnd; k++) rIdx.set(k, h);
-
         const out = [];
         let bi = 0;
         while (bi < bLines.length) {
@@ -954,7 +983,6 @@ async save() {
         }
         return {merged: out.join('\n'), hasConflict: true};
     },
-
     // --- TOAST ---
     showToast(message, duration = 5000) {
         const el = document.getElementById('toast');
@@ -963,7 +991,6 @@ async save() {
         clearTimeout(this._toastTimer);
         this._toastTimer = setTimeout(() => el.classList.remove('show'), duration);
     },
-
     // --- CONFLICT / BACKUP HELPERS ---
     /**
      * Store backup content in IndexedDB so the user can retrieve it later
@@ -984,116 +1011,6 @@ async save() {
             return true;
         } catch (e) { return false; }
     },
-
-    // --- SYNC ---
-    _updateSyncMetadata(file, digest, now) {
-        this.state.lastMTime = file.lastModified;
-        this.state.lastDigest = digest;
-        this.state.lastDigestCheck = now;
-    },
-
-    async syncFromDisk() {
-        if (!this.state.currentHandle || !this.state.key || this.state.syncInProgress || this.state.decryptionFailed) return;
-        clearTimeout(this.state._saveUnlockTimeout);
-        this.state.syncInProgress = true;
-        try {
-            const now = Date.now();
-            const hasDigest = this.state.lastDigest !== null;
-            const shouldThrottle = hasDigest && now - this.state.lastDigestCheck < APP_CONFIG.DIGEST_THROTTLE_MS;
-
-            const file = await this.state.currentHandle.getFile();
-            
-            // Check file size to prevent OOM
-            const maxSizeBytes = APP_CONFIG.MAX_FILE_SIZE_MB * 1024 * 1024;
-            if (file.size > maxSizeBytes) {
-                document.getElementById('save-status').textContent = `⚠️ File too large (max ${APP_CONFIG.MAX_FILE_SIZE_MB}MB)`;
-                return;
-            }
-            
-            const mtimeNewer = file.lastModified > this.state.lastMTime;
-            // Skip disk hashing when throttled, no local edits, and mtime unchanged.
-            if (!this.state.isDirty && !mtimeNewer && shouldThrottle) return;
-            // Digest comparison catches shared-drive updates even when mtime stays the same.
-            const buffer = await file.arrayBuffer();
-            const digest = await this.computeDigest(buffer);
-            if (digest === this.state.lastDigest) {
-                this._updateSyncMetadata(file, digest, now);
-                return;
-            }
-            this.state.lastDigestCheck = now;
-
-            // Track this remote change for activity detection
-            this._trackRemoteSync();
-
-            clearTimeout(this.state.saveTimeout);
-            const result = await this.getDecryptedText(new Uint8Array(buffer));
-            if (!result.success) return;
-            const remoteBytes = result.plainBytes;
-            // If user hasn't edited locally, just reload silently
-            if (!this.state.isDirty) {
-                document.getElementById('editor').value = new TextDecoder().decode(remoteBytes);
-                this._setBaseContent(remoteBytes);
-                this._updateSyncMetadata(file, digest, now);
-                this.state.isDirty = false;
-                document.getElementById('save-status').textContent = this.state.remoteReadOnly
-                    ? '👁️ Read-only — file in use by another session'
-                    : 'Synced from disk';
-                return;
-            }
-
-            // User has local edits — attempt three-way merge
-            const localText = document.getElementById('editor').value;
-            const baseBytes = this.state.baseContent;
-
-            // If no base snapshot exists, we can't do a three-way merge.
-            // Fall back: keep remote, store local as backup.
-            if (baseBytes == null) {
-                await this._storeBackup(this.state.currentHandle.name, localText);
-                document.getElementById('editor').value = new TextDecoder().decode(remoteBytes);
-                this._setBaseContent(remoteBytes);
-                this._updateSyncMetadata(file, digest, now);
-                this.state.isDirty = false;
-                this.showToast('Remote updated — local edits backed up');
-                document.getElementById('save-status').textContent = 'Synced from disk';
-                return;
-            }
-
-            // If base matches remote, nothing new from remote
-            if (arraysEqual(baseBytes, remoteBytes)) {
-                this._wipeBytes(remoteBytes);
-                this._updateSyncMetadata(file, digest, now);
-                return;
-            }
-            // If base matches local, local had no real change
-            const localBytes = new TextEncoder().encode(localText);
-            if (arraysEqual(baseBytes, localBytes)) {
-                localBytes.fill(0);
-                document.getElementById('editor').value = new TextDecoder().decode(remoteBytes);
-                this._setBaseContent(remoteBytes);
-                this._updateSyncMetadata(file, digest, now);
-                this.state.isDirty = false;
-                document.getElementById('save-status').textContent = 'Synced from disk';
-                return;
-            }
-            localBytes.fill(0);
-
-            // Both local and remote have changes relative to base.
-            // Conservative approach: don't attempt automatic merge (diff3Merge is unreliable).
-            // Store local edits as backup and load the remote version.
-            await this._storeBackup(this.state.currentHandle.name, localText);
-            document.getElementById('editor').value = new TextDecoder().decode(remoteBytes);
-            this._setBaseContent(remoteBytes);
-            this._updateSyncMetadata(file, digest, now);
-            this.state.isDirty = false;
-            this.showToast('⚠️ Conflict detected — local edits backed up, loaded remote version');
-            document.getElementById('save-status').textContent = '⚠️ Conflict — local backed up';
-        } catch (e) {
-            // Log sync failures for debugging, but don't alert user
-            console.warn('Sync error:', e);
-        }
-        finally { this.state.syncInProgress = false; }
-    },
-
     // --- SIDEBAR UI ---
     async removeHandle(e, name) {
         e.stopPropagation();
@@ -1110,21 +1027,19 @@ async save() {
                 req.onsuccess = () => resolve();
                 req.onerror = () => reject(req.error);
             });
-
+            await this.deleteLockEntry(name);
             if (this.state.currentHandle?.name === name) {
                 this.state.currentHandle = null;
                 this.updateSaveButtonLabel();
-                this.teardownFileObserver();
+                this.teardownLockPoller();
                 document.getElementById('editor').value = '';
                 document.getElementById('active-filename').textContent = 'No file selected';
             }
             await this.renderList();
         }
     },
-
     async renderList() {
         const list = document.getElementById('file-list');
-
         if (!this.state.db) {
             list.textContent = '';
             const p = document.createElement('p');
@@ -1133,15 +1048,12 @@ async save() {
             list.appendChild(p);
             return;
         }
-
         list.textContent = '';
-
         try {
             const results = await this.getHandlesFromDB();
             const handles = results.filter(h => h && typeof h.kind === 'string' && typeof h.getFile === 'function');
             const sorted = handles.sort((a, b) => a.name.localeCompare(b.name));
             const fragment = document.createDocumentFragment();
-
             sorted.forEach(h => {
                 const item = document.createElement('div');
                 item.className = `file-item ${this.state.currentHandle?.name === h.name ? 'active' : ''}`;
@@ -1149,26 +1061,21 @@ async save() {
                 item.setAttribute('tabindex', '0');
                 item.setAttribute('role', 'button');
                 item.setAttribute('aria-label', `Open file ${h.name}`);
-
                 const nameSpan = document.createElement('span');
                 nameSpan.style.overflow = 'hidden';
                 nameSpan.style.textOverflow = 'ellipsis';
                 // textContent is used here (not innerHTML) to prevent XSS
                 nameSpan.textContent = h.name;
-
                 const removeBtn = document.createElement('span');
                 removeBtn.className = 'remove-btn';
                 removeBtn.textContent = '✕';
                 removeBtn.setAttribute('aria-label', `Remove file ${h.name}`);
                 removeBtn.setAttribute('role', 'button');
-
                 item.appendChild(nameSpan);
                 item.appendChild(removeBtn);
                 fragment.appendChild(item);
             });
-
             list.appendChild(fragment);
-
             if (sorted.length === 0) {
                 const p = document.createElement('p');
                 p.style.color = 'var(--text-sub)';
@@ -1183,7 +1090,6 @@ async save() {
             list.appendChild(p);
         }
     },
-
     async getDecryptedText(buffer) {
         if (buffer.byteLength === 0) {
             return {plainBytes: new Uint8Array(0), success: true};
@@ -1204,10 +1110,8 @@ async save() {
         }
         const iv = buffer.slice(1 + APP_CONFIG.SALT_LENGTH, 1 + APP_CONFIG.SALT_LENGTH + APP_CONFIG.IV_LENGTH);
         const ciphertext = buffer.slice(1 + APP_CONFIG.SALT_LENGTH + APP_CONFIG.IV_LENGTH);
-
         // Build metadata buffer [Version][Salt][IV] for GCM additional authenticated data
         const metadata = buffer.slice(0, 1 + APP_CONFIG.SALT_LENGTH + APP_CONFIG.IV_LENGTH);
-
         try {
             const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv, additionalData: metadata }, key, ciphertext);
             return {plainBytes: new Uint8Array(plain), success: true};
@@ -1216,13 +1120,11 @@ async save() {
         }
     }
 };
-
 const arraysEqual = (a, b) => {
     if (a.byteLength !== b.byteLength) return false;
     for (let i = 0; i < a.byteLength; i++) if (a[i] !== b[i]) return false;
     return true;
 };
-
 document.getElementById('app-version').textContent = `v${APP_CONFIG.VERSION}`;
 App.init();
 </script>
