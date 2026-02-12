@@ -393,11 +393,12 @@ async unlock() {
         clearTimeout(this.state.saveTimeout);
         this.inactivityManager.cleanup();
         this.cleanupFileListHandlers();
-        await this.releaseCurrentLock(); // writes released flag if file open
         this.teardownLockPoller();
-
         const editor = document.getElementById('editor');
         if (editor) editor.oninput = null;
+        this.state.sessionUuidBytes = null;
+        await this.releaseCurrentLock(); // writes released flag if file open
+
         const passInput = document.getElementById('pass-input');
         if (this.state.passInputKeypressHandler && passInput) {
             passInput.removeEventListener('keypress', this.state.passInputKeypressHandler);
@@ -408,7 +409,6 @@ async unlock() {
         this._setBaseContent(null);
         this.state.key = null;
         this.state.currentHandle = null;
-        this.state.sessionUuidBytes = null;
         this.updateSaveButtonLabel();
         this.state.isDirty = false;
         if (this.state.db) { this.state.db.close(); this.state.db = null; }
@@ -660,7 +660,7 @@ async unlock() {
     },
 
     async save() {
-        if (!this.state.currentHandle || !this.state.key || this.state.decryptionFailed) return;
+        if (!this.state.currentHandle || !this.state.key || !this.state.sessionUuidBytes || this.state.decryptionFailed) return;
         try {
             const plainBytes = new TextEncoder().encode(document.getElementById('editor').value);
             const encrypted = await this.encrypt(plainBytes);
