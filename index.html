@@ -146,7 +146,7 @@
 
 <script>
 const APP_CONFIG = {
-    VERSION: '1.4', // team review hardening
+    VERSION: '1.5', // concurrent-edit lock hardening
     FILE_FORMAT_VERSION: 0x02, // new version with lock header
     SALT_LENGTH: 16,
     IV_LENGTH: 12,
@@ -161,7 +161,10 @@ const APP_CONFIG = {
     LOCK_STALE_MS: 15 * 60 * 1000, // 15 min
     LOCK_POLL_MS: 12000,           // 12 s – light poll (owned)
     LOCK_POLL_READONLY_MS: 4000,   // 4 s – fast poll (read-only)
+    LOCK_HEARTBEAT_MS: 5 * 60 * 1000, // 5 min – heartbeat to keep lock alive
 };
+// Derived: total header size (version + salt + iv + lock header)
+APP_CONFIG.FULL_HEADER_SIZE = 1 + APP_CONFIG.SALT_LENGTH + APP_CONFIG.IV_LENGTH + APP_CONFIG.LOCK_HEADER_LENGTH;
 
 const App = {
     state: {
@@ -176,7 +179,9 @@ const App = {
         baseContent: null,
         saveTimeout: null,
         lockPollInterval: null,
+        lockHeartbeatInterval: null,   // heartbeat to refresh lock timestamp
         lockChannel: null,             // BroadcastChannel for lock events
+        _isSaving: false,              // mutex flag to prevent concurrent saves
         fileListClickHandler: null,
         fileListKeydownHandler: null,
         editorInputHandler: null,
@@ -207,12 +212,14 @@ const App = {
             if (filename) filename.style.color = 'var(--danger)';
             if (takeoverBtn && reason !== 'decryption failed') takeoverBtn.classList.remove('hidden');
             this.showToast('File is locked by another session', 5000);
+            this.teardownLockHeartbeat(); // no heartbeat when read-only
         } else {
             editor.disabled = !this.state.key || this.state.decryptionFailed;
             status.textContent = this.state.key ? 'Editing enabled' : 'Session Active';
             if (badge) badge.classList.add('hidden');
             if (filename) filename.style.color = '';
             if (takeoverBtn) takeoverBtn.classList.add('hidden');
+            this.setupLockHeartbeat(); // keep lock alive while editing
         }
         // Adaptive polling: faster when read-only, slower when owned
         this.setupLockPoller();
@@ -405,6 +412,7 @@ async unlock() {
         this.inactivityManager.cleanup();
         this.cleanupFileListHandlers();
         this.teardownLockPoller();
+        this.teardownLockHeartbeat();
         const editor = document.getElementById('editor');
         if (editor) editor.oninput = null;
         this.state.sessionUuidBytes = null;
@@ -525,6 +533,12 @@ async unlock() {
     async importNote() {
         try {
             const [h] = await window.showOpenFilePicker();
+            // Release the lock on the current file before switching
+            // so any waiting read-only sessions can auto-promote to editor.
+            if (this.state.currentHandle) {
+                await this.releaseCurrentLock();
+                this.broadcastLockRelease();
+            }
             await this.persistHandle(h);
             await this.loadFile(h);
             document.getElementById('save-status').textContent = "✓ File imported";
@@ -686,8 +700,8 @@ async unlock() {
     readLockInfoFromRawHeader(buffer) {
         if (!buffer || buffer.byteLength === 0) return null;
         if (buffer[0] !== APP_CONFIG.FILE_FORMAT_VERSION) return null; // no lock header
+        if (buffer.byteLength < APP_CONFIG.FULL_HEADER_SIZE) return null;
         const lockStart = 1 + APP_CONFIG.SALT_LENGTH + APP_CONFIG.IV_LENGTH;
-        if (buffer.byteLength < lockStart + APP_CONFIG.LOCK_HEADER_LENGTH) return null;
         const lockHeader = buffer.slice(lockStart, lockStart + APP_CONFIG.LOCK_HEADER_LENGTH);
         const tsView = new DataView(lockHeader.buffer, lockHeader.byteOffset + 16, 8);
         const ts = tsView.getBigUint64(0, true);
@@ -701,8 +715,8 @@ async unlock() {
         const buffer = await file.arrayBuffer();
         const result = await this.getDecryptedText(new Uint8Array(buffer));
         if (!result.success || !result.lockInfo || this.isLockOwnedOrStale(result.lockInfo)) {
-            // safe to claim / refresh
-            await this.save(); // re-saves with fresh lock header (timestamp update)
+            // safe to claim / refresh — use forceClaim to bypass read-only guard
+            await this.save(true); // re-saves with fresh lock header (timestamp update)
         }
     },
 
@@ -710,22 +724,46 @@ async unlock() {
      * Re-read the current file from disk, update editor + baseContent,
      * then claim the lock. Used when promoting from read-only to editor
      * after the previous owner released the lock.
+     * Returns true if claim succeeded, false if another session won the race.
      */
     async refreshAndClaim() {
-        if (!this.state.currentHandle) return;
+        if (!this.state.currentHandle) return false;
         const file = await this.state.currentHandle.getFile();
         const buffer = await file.arrayBuffer();
         const result = await this.getDecryptedText(new Uint8Array(buffer));
         if (result.success) {
+            // Re-check: another session may have claimed between our read and now
+            if (result.lockInfo && !this.isLockOwnedOrStale(result.lockInfo)) {
+                return false; // lost the race – stay read-only
+            }
             document.getElementById('editor').value = new TextDecoder().decode(result.plainBytes);
             this._setBaseContent(result.plainBytes);
         }
         await this.claimLockIfNeeded();
+        return true;
     },
 
-    async save() {
+    async save(forceClaim = false) {
         if (!this.state.currentHandle || !this.state.key || !this.state.sessionUuidBytes || this.state.decryptionFailed) return;
+        // Prevent save while in read-only mode (auto-save timer may fire after demotion)
+        if (this.state.isReadOnly && !forceClaim) return;
+        // Mutex: prevent concurrent saves from overlapping
+        if (this.state._isSaving) return;
+        this.state._isSaving = true;
         try {
+            // Pre-check: verify we still own the lock before writing
+            // Skip when forceClaim is true (explicit user take-over)
+            if (!forceClaim) {
+                const file = await this.state.currentHandle.getFile();
+                const headerBuffer = await file.slice(0, APP_CONFIG.FULL_HEADER_SIZE).arrayBuffer();
+                const lockInfo = this.readLockInfoFromRawHeader(new Uint8Array(headerBuffer));
+                if (lockInfo && !this.isLockOwnedOrStale(lockInfo)) {
+                    // Another session claimed the lock – demote to read-only
+                    const lockTime = new Date(lockInfo.ts).toLocaleTimeString();
+                    this._setReadOnly(true, `another session (since ${lockTime})`);
+                    return;
+                }
+            }
             const plainBytes = new TextEncoder().encode(document.getElementById('editor').value);
             const encrypted = await this.encrypt(plainBytes);
             const stream = await this.state.currentHandle.createWritable();
@@ -737,6 +775,8 @@ async unlock() {
         } catch (e) {
             console.error('Save failed:', e);
             document.getElementById('save-status').textContent = "⚠️ Save error";
+        } finally {
+            this.state._isSaving = false;
         }
     },
 
@@ -767,7 +807,7 @@ async unlock() {
             if (!this.state.currentHandle || this.state.decryptionFailed) return;
             try {
                 const file = await this.state.currentHandle.getFile();
-                const headerBuffer = await file.slice(0, 1 + APP_CONFIG.SALT_LENGTH + APP_CONFIG.IV_LENGTH + APP_CONFIG.LOCK_HEADER_LENGTH).arrayBuffer();
+                const headerBuffer = await file.slice(0, APP_CONFIG.FULL_HEADER_SIZE).arrayBuffer();
                 const lockInfo = this.readLockInfoFromRawHeader(new Uint8Array(headerBuffer));
                 if (lockInfo && !this.isLockOwnedOrStale(lockInfo)) {
                     if (!this.state.isReadOnly) {
@@ -779,10 +819,13 @@ async unlock() {
                         this.showToast('Edits discarded – file locked remotely');
                     }
                 } else if (this.state.isReadOnly) {
-                    // Lock released/stale – refresh content and claim ownership
-                    await this.refreshAndClaim();
-                    this._setReadOnly(false);
-                    this.showToast('Lock released – editing enabled');
+                    // Lock released/stale – refresh content and try to claim ownership
+                    const claimed = await this.refreshAndClaim();
+                    if (claimed) {
+                        this._setReadOnly(false);
+                        this.showToast('Lock released – editing enabled');
+                    }
+                    // If claim failed, stay read-only – next poll will re-check
                 }
             } catch (e) {
                 console.warn('Lock poll failed:', e);
@@ -797,6 +840,31 @@ async unlock() {
         }
     },
 
+    /**
+     * Heartbeat: periodically re-save to refresh the lock timestamp when the
+     * user is idle (no edits) but the session is still active. Prevents the
+     * lock from going stale while the user is reading.
+     */
+    setupLockHeartbeat() {
+        this.teardownLockHeartbeat();
+        if (!this.state.currentHandle || this.state.isReadOnly || this.state.decryptionFailed) return;
+        this.state.lockHeartbeatInterval = setInterval(async () => {
+            if (!this.state.currentHandle || this.state.isReadOnly || this.state.decryptionFailed) return;
+            if (this.state._isSaving) return; // save already in progress
+            try {
+                await this.save(); // re-writes with fresh timestamp
+            } catch (e) {
+                console.warn('Lock heartbeat failed:', e);
+            }
+        }, APP_CONFIG.LOCK_HEARTBEAT_MS);
+    },
+    teardownLockHeartbeat() {
+        if (this.state.lockHeartbeatInterval) {
+            clearInterval(this.state.lockHeartbeatInterval);
+            this.state.lockHeartbeatInterval = null;
+        }
+    },
+
     // --- BROADCAST CHANNEL (same-origin lock notification) ---
     setupLockChannel() {
         try {
@@ -807,9 +875,12 @@ async unlock() {
                 if (msg.type === 'lock-released' && msg.filename === this.state.currentHandle.name) {
                     // Another tab released the lock – refresh content and claim
                     if (this.state.isReadOnly) {
-                        this.refreshAndClaim().then(() => {
-                            this._setReadOnly(false);
-                            this.showToast('Lock released by another tab – editing enabled');
+                        this.refreshAndClaim().then((claimed) => {
+                            if (claimed) {
+                                this._setReadOnly(false);
+                                this.showToast('Lock released by another tab – editing enabled');
+                            }
+                            // If claim failed, another tab won the race – stay read-only
                         }).catch((err) => {
                             console.warn('Broadcast claim failed:', err);
                         });
@@ -842,7 +913,29 @@ async unlock() {
         if (!this.state.currentHandle || !this.state.key) return;
         if (!confirm('Take over editing? This will claim the lock from any other session.')) return;
         try {
-            await this.save();
+            // Re-read disk content to avoid overwriting the other session's latest edits
+            const file = await this.state.currentHandle.getFile();
+            const buffer = await file.arrayBuffer();
+            const result = await this.getDecryptedText(new Uint8Array(buffer));
+            if (result.success) {
+                const diskText = new TextDecoder().decode(result.plainBytes);
+                const editorText = document.getElementById('editor').value;
+                // If both differ from base, do a three-way merge
+                if (this.state.baseContent && editorText !== diskText) {
+                    const baseText = new TextDecoder().decode(this.state.baseContent);
+                    if (diskText !== baseText) {
+                        const merged = this.diff3Merge(baseText, editorText, diskText);
+                        document.getElementById('editor').value = merged.merged;
+                        if (merged.hasConflict) {
+                            await this._storeBackup(this.state.currentHandle.name, editorText);
+                            this.showToast('⚠️ Merge conflict – resolve markers manually', 8000);
+                        }
+                    }
+                }
+                this._setBaseContent(result.plainBytes);
+            }
+            // Force-claim the lock (bypass pre-check since user consented)
+            await this.save(true);
             this._setReadOnly(false);
             this.showToast('Lock claimed – editing enabled');
         } catch (e) {
@@ -1143,7 +1236,7 @@ async unlock() {
         // a read-only user from inadvertently claiming the lock
         try {
             const file = await this.state.currentHandle.getFile();
-            const headerBuffer = await file.slice(0, 1 + APP_CONFIG.SALT_LENGTH + APP_CONFIG.IV_LENGTH + APP_CONFIG.LOCK_HEADER_LENGTH).arrayBuffer();
+            const headerBuffer = await file.slice(0, APP_CONFIG.FULL_HEADER_SIZE).arrayBuffer();
             const lockInfo = this.readLockInfoFromRawHeader(new Uint8Array(headerBuffer));
             if (lockInfo && !this.isLockOwnedOrStale(lockInfo)) {
                 // Another session holds the lock – reload content read-only
