@@ -149,6 +149,7 @@ const APP_CONFIG = {
     GCM_TAG_LENGTH: 16,
     PBKDF2_ITERATIONS: 600000,
     OBSERVER_DEBOUNCE_MS: 250,
+    POLL_INTERVAL_MS: 5000,    // fallback polling interval when FileSystemObserver is unavailable
     DIGEST_THROTTLE_MS: 15000, // throttle digest hashing to reduce shared-drive I/O
     AUTO_SAVE_DELAY_MS: 1000,
     INACTIVITY_TIMEOUT_MS: 10 * 60 * 1000,
@@ -164,6 +165,7 @@ state: {
     currentHandle: null,
     fileObserver: null,
     fileObserverTimeout: null,
+    pollTimer: null,
     syncInProgress: false,
     lastMTime: 0,
     lastDigest: null,
@@ -239,10 +241,30 @@ state: {
         this.state.fileObserver = null;
         clearTimeout(this.state.fileObserverTimeout);
         this.state.fileObserverTimeout = null;
+        this.stopPolling();
+    },
+
+    startPolling() {
+        this.stopPolling();
+        this.state.pollTimer = setInterval(async () => {
+            if (!this.state.syncInProgress) {
+                try { await this.syncFromDisk(); }
+                catch (e) { console.warn('Poll sync error:', e); }
+            }
+        }, APP_CONFIG.POLL_INTERVAL_MS);
+    },
+
+    stopPolling() {
+        clearInterval(this.state.pollTimer);
+        this.state.pollTimer = null;
     },
 
 async setupFileObserver(handle) {
-    if (!handle || !('FileSystemObserver' in window)) return;
+    if (!handle) return;
+    if (!('FileSystemObserver' in window)) {
+        this.startPolling();
+        return;
+    }
     try {
         this.teardownFileObserver();
         const observer = new FileSystemObserver((records) => {
@@ -262,7 +284,8 @@ async setupFileObserver(handle) {
     } catch (e) {
             this.teardownFileObserver();
             const reason = e?.name || 'unknown';
-            console.warn(`FileSystemObserver setup failed (${reason}); automatic file sync unavailable.`, e);
+            console.warn(`FileSystemObserver setup failed (${reason}); falling back to polling.`, e);
+            this.startPolling();
         }
     },
 
