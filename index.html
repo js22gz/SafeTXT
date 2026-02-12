@@ -142,45 +142,38 @@
 
 <script>
 const APP_CONFIG = {
-    VERSION: '1.2', // Bumped for lock changes
-    FILE_FORMAT_VERSION: 0x01,
+    VERSION: '1.3', // bumped for embedded lock
+    FILE_FORMAT_VERSION: 0x02, // new version with lock header
     SALT_LENGTH: 16,
     IV_LENGTH: 12,
-    GCM_TAG_LENGTH: 16,
+    LOCK_HEADER_LENGTH: 32,     // 16 uuid + 8 ts + 1 released + 7 pad
     PBKDF2_ITERATIONS: 600000,
-    DIGEST_THROTTLE_MS: 15000, // throttle digest hashing to reduce shared-drive I/O
     AUTO_SAVE_DELAY_MS: 1000,
     INACTIVITY_TIMEOUT_MS: 10 * 60 * 1000,
-    MAX_FILE_SIZE_MB: 100, // Maximum file size in megabytes
-    DB_NAME: 'LocalNote_v2026', // preserve original name so existing users keep their file handles
+    MAX_FILE_SIZE_MB: 100,
+    DB_NAME: 'LocalNote_v2026',
     DB_VERSION: 2,
-    LOCK_SUFFIX: '.lock',
-    LOCK_STALE_MS: 15 * 60 * 1000,    // 15 min
-    LOCK_POLL_MS: 10000,              // 10 s poll for lock status
-    LOCK_POLL_DEBOUNCE_MS: 500,
+    LOCK_STALE_MS: 15 * 60 * 1000, // 15 min
+    LOCK_POLL_MS: 12000,           // 12 s – light poll
 };
+
 const App = {
-state: {
-    db: null,
-    key: null,
-    currentHandle: null,
-    syncInProgress: false,
-    lastMTime: 0,
-    lastDigest: null,
-    lastDigestCheck: 0,
-    isDirty: false,
-    decryptionFailed: false,
-    baseContent: null,
-    saveTimeout: null,
-    // Event handlers storage for proper cleanup
-    fileListClickHandler: null,
-    fileListKeydownHandler: null,
-    editorInputHandler: null,
-    passInputKeypressHandler: null,
-    sessionId: null,
-    currentLockHandle: null,
-    lockPollInterval: null,
-},
+    state: {
+        db: null,
+        key: null,
+        currentHandle: null,
+        sessionId: null,               // string UUID
+        sessionUuidBytes: null,        // Uint8Array(16) version
+        isDirty: false,
+        decryptionFailed: false,
+        baseContent: null,
+        saveTimeout: null,
+        lockPollInterval: null,
+        fileListClickHandler: null,
+        fileListKeydownHandler: null,
+        editorInputHandler: null,
+        passInputKeypressHandler: null,
+    },
     _toastTimer: null,
     _wipeBytes(arr) {
         if (arr instanceof Uint8Array) arr.fill(0);
@@ -191,18 +184,17 @@ state: {
         }
         this.state.baseContent = bytes;
     },
-    _setReadOnlyDueToLock(readOnly, reason = '') {
-        if (this.state.decryptionFailed) readOnly = true; // Override if failed decrypt
+    _setReadOnly(readOnly, reason = '') {
         const editor = document.getElementById('editor');
         const status = document.getElementById('save-status');
         if (readOnly) {
             editor.disabled = true;
             clearTimeout(this.state.saveTimeout);
-            status.textContent = `👁️ Locked by ${reason || 'another session'} – read-only`;
+            status.textContent = `👁️ Locked${reason ? ' by ' + reason : ''} – read-only`;
             this.showToast('File is locked by another session', 5000);
         } else {
-            if (!this.state.decryptionFailed && this.state.key) editor.disabled = false;
-            status.textContent = 'Editing enabled';
+            editor.disabled = !this.state.key || this.state.decryptionFailed;
+            status.textContent = this.state.key ? 'Editing enabled' : 'Session Active';
         }
     },
     async init() {
@@ -214,9 +206,6 @@ state: {
                 req.onupgradeneeded = (e) => {
                     const db = e.target.result;
                     if (!db.objectStoreNames.contains('handles')) db.createObjectStore('handles');
-                    if (e.oldVersion < 2 && !db.objectStoreNames.contains('locks')) {
-                        db.createObjectStore('locks');
-                    }
                 };
                 req.onsuccess = () => resolve(req.result);
                 req.onerror = () => reject(req.error);
@@ -240,28 +229,21 @@ state: {
         document.getElementById('editor').oninput = this.state.editorInputHandler;
     },
     setupPassInputHandler() {
-        this.state.passInputKeypressHandler = (e) => {
-            if (e.key === 'Enter') this.unlock();
-        };
+        this.state.passInputKeypressHandler = (e) => { if (e.key === 'Enter') this.unlock(); };
         document.getElementById('pass-input').addEventListener('keypress', this.state.passInputKeypressHandler);
     },
     setupServiceWorker() {
         if ('serviceWorker' in navigator) {
             navigator.serviceWorker.register('./sw.js')
-                .then(() => console.log('Service Worker registered successfully'))
-                .catch((error) => console.warn('Service Worker registration failed:', error));
+                .then(() => console.log('Service Worker registered'))
+                .catch(err => console.warn('Service Worker failed:', err));
         }
     },
     setupFileListHandlers() {
         const fileList = document.getElementById('file-list');
-        // Remove old handlers if they exist to prevent duplicate listeners
-        if (this.state.fileListClickHandler) {
-            fileList.removeEventListener('click', this.state.fileListClickHandler);
-        }
-        if (this.state.fileListKeydownHandler) {
-            fileList.removeEventListener('keydown', this.state.fileListKeydownHandler);
-        }
-        // Store handlers for later cleanup
+        if (this.state.fileListClickHandler) fileList.removeEventListener('click', this.state.fileListClickHandler);
+        if (this.state.fileListKeydownHandler) fileList.removeEventListener('keydown', this.state.fileListKeydownHandler);
+
         this.state.fileListClickHandler = (e) => {
             const removeBtn = e.target.closest('.remove-btn');
             if (removeBtn) {
@@ -276,6 +258,7 @@ state: {
                 req.onsuccess = () => { if (req.result) this.loadFile(req.result); };
             }
         };
+
         this.state.fileListKeydownHandler = (e) => {
             const item = e.target.closest('.file-item');
             if (!item || !this.state.db) return;
@@ -289,13 +272,13 @@ state: {
                 this.removeHandle(e, item.getAttribute('data-filename'));
             }
         };
+
         fileList.addEventListener('click', this.state.fileListClickHandler);
         fileList.addEventListener('keydown', this.state.fileListKeydownHandler);
     },
     cleanupFileListHandlers() {
         const fileList = document.getElementById('file-list');
         if (!fileList) return;
-        
         if (this.state.fileListClickHandler) {
             fileList.removeEventListener('click', this.state.fileListClickHandler);
             this.state.fileListClickHandler = null;
@@ -305,6 +288,7 @@ state: {
             this.state.fileListKeydownHandler = null;
         }
     },
+    
     // --- INACTIVITY TIMER ---
     inactivityManager: {
         INACTIVITY_THRESHOLD: APP_CONFIG.INACTIVITY_TIMEOUT_MS,
@@ -365,140 +349,112 @@ state: {
         }
     },
     // --- SESSION CONTROL ---
-    async unlock() {
+async unlock() {
         const inputEl = document.getElementById('pass-input');
-        const pass = inputEl.value;
-        
+        const pass = inputEl.value.trim();
         if (!pass || pass.length < 12) {
-            alert("Password must be at least 12 characters for security.");
+            alert("Secret must be at least 12 characters.");
             return;
         }
-        
-        // Encode password to Uint8Array so we can wipe it after use
         const passBytes = new TextEncoder().encode(pass);
-        
         try {
-            this.state.key = await crypto.subtle.importKey(
-                "raw", passBytes, "PBKDF2", false, ["deriveKey"]
-            );
-            
+            this.state.key = await crypto.subtle.importKey("raw", passBytes, "PBKDF2", false, ["deriveKey"]);
+            this.state.sessionId = crypto.randomUUID();
+            const uuidNoDashes = this.state.sessionId.replace(/-/g, '');
+            this.state.sessionUuidBytes = new Uint8Array(16);
+            for (let i = 0; i < 16; i++) {
+                this.state.sessionUuidBytes[i] = parseInt(uuidNoDashes.substr(i*2, 2), 16);
+            }
             passBytes.fill(0);
             inputEl.value = "";
             document.getElementById('unlock-overlay').classList.add('hidden');
             document.getElementById('app-shell').classList.remove('blur');
-            document.getElementById('editor').disabled = false;
-            document.getElementById('save-status').textContent = "Session Active";
-            this.updateSaveButtonLabel();
             this.inactivityManager.init();
-            this.state.sessionId = crypto.randomUUID();
+            this.updateSaveButtonLabel();
         } catch (e) {
             passBytes.fill(0);
             console.error('Unlock failed:', e);
-            alert('Failed to initialize session. Please try again.');
+            alert('Session init failed.');
             this.state.key = null;
         }
     },
     async lock(force = false) {
-        if (!force && !confirm("Lock session? You will need to re-enter your key to view notes.")) return;
+        if (!force && !confirm("Lock session?")) return;
         clearTimeout(this.state.saveTimeout);
         this.inactivityManager.cleanup();
-        // Clean up event listeners to prevent memory leaks
         this.cleanupFileListHandlers();
-        
-        await this.releaseCurrentLock();
+        await this.releaseCurrentLock(); // writes released flag if file open
         this.teardownLockPoller();
-        
-        // Remove editor input handler
+
         const editor = document.getElementById('editor');
-        if (editor) {
-            editor.oninput = null;
-        }
-        
-        // Remove password input keypress handler
+        if (editor) editor.oninput = null;
         const passInput = document.getElementById('pass-input');
         if (this.state.passInputKeypressHandler && passInput) {
             passInput.removeEventListener('keypress', this.state.passInputKeypressHandler);
             this.state.passInputKeypressHandler = null;
         }
-        // Clear sensitive data from memory before reload.
-        // Uint8Array buffers are mutable and can be wiped in-place,
-        // unlike JS strings which are immutable and persist until GC.
-        if (editor) {
-            editor.value = '';
-        }
-        if (passInput) {
-            passInput.value = '';
-        }
-        
-        // Wipe baseContent Uint8Array in-place before releasing
+        if (editor) editor.value = '';
+        if (passInput) passInput.value = '';
         this._setBaseContent(null);
-        
-        // Clear key reference (CryptoKey is opaque and not inspectable)
         this.state.key = null;
         this.state.currentHandle = null;
+        this.state.sessionUuidBytes = null;
         this.updateSaveButtonLabel();
         this.state.isDirty = false;
-        this.state.lastMTime = 0;
-        this.state.lastDigest = null;
-        this.state.lastDigestCheck = 0;
         if (this.state.db) { this.state.db.close(); this.state.db = null; }
-        // Instruct service worker to purge cached app content with timeout
         try {
-            if (navigator.serviceWorker && navigator.serviceWorker.controller) {
+            if (navigator.serviceWorker?.controller) {
                 navigator.serviceWorker.controller.postMessage({ type: 'CLEAR_CACHE' });
             }
-        } catch (e) {
-            console.warn('Failed to send clear cache message to service worker:', e);
-        }
+        } catch (e) {}
         location.reload();
     },
     togglePass() {
         const el = document.getElementById('pass-input');
         el.type = el.type === 'password' ? 'text' : 'password';
     },
-    // --- CRYPTO ENGINE ---
     async deriveKeyFromSalt(salt) {
         if (!this.state.key) throw new Error("Session locked");
-        if (!salt) throw new Error("Salt is required for key derivation.");
         return crypto.subtle.deriveKey(
-            {
-                name: "PBKDF2",
-                salt,
-                iterations: APP_CONFIG.PBKDF2_ITERATIONS,
-                hash: "SHA-256"
-            },
+            { name: "PBKDF2", salt, iterations: APP_CONFIG.PBKDF2_ITERATIONS, hash: "SHA-256" },
             this.state.key,
             { name: "AES-GCM", length: 256 },
             false,
             ["encrypt", "decrypt"]
         );
     },
-        
-async encrypt(plainBytes) {
-        if (!this.state.key) throw new Error('Unlock session first.');
-        // Always generate a fresh random salt per encryption operation
+    async encrypt(plainBytes, lockUuid = this.state.sessionUuidBytes, lockTs = BigInt(Date.now()), released = 0) {
+        if (!this.state.key) throw new Error('Unlock first.');
         const salt = crypto.getRandomValues(new Uint8Array(APP_CONFIG.SALT_LENGTH));
         const fileKey = await this.deriveKeyFromSalt(salt);
         const iv = crypto.getRandomValues(new Uint8Array(APP_CONFIG.IV_LENGTH));
-        // Build metadata buffer [Version][Salt][IV] for GCM additional authenticated data
-        const metadata = new Uint8Array(1 + salt.length + iv.length);
+
+        // Lock header: 32 bytes
+        const lockHeader = new Uint8Array(APP_CONFIG.LOCK_HEADER_LENGTH);
+        lockHeader.set(lockUuid || new Uint8Array(16), 0); // uuid bytes
+        const tsView = new DataView(lockHeader.buffer, 16, 8);
+        tsView.setBigUint64(0, BigInt(lockTs), true); // little-endian
+        lockHeader[24] = released ? 1 : 0;
+        // bytes 25-31 = 0 (padding)
+
+        const metadata = new Uint8Array(1 + salt.length + iv.length + lockHeader.length);
         metadata[0] = APP_CONFIG.FILE_FORMAT_VERSION;
         metadata.set(salt, 1);
         metadata.set(iv, 1 + salt.length);
-        
-        // Encrypt with additionalData to authenticate the file header
+        metadata.set(lockHeader, 1 + salt.length + iv.length);
+
         const cipher = await crypto.subtle.encrypt(
-            { name: "AES-GCM", iv, additionalData: metadata }, 
-            fileKey, 
+            { name: "AES-GCM", iv, additionalData: metadata },
+            fileKey,
             plainBytes
         );
-        // Pack the binary: [Version][Salt][IV][Cipher]
+
         const blob = new Uint8Array(metadata.length + cipher.byteLength);
         blob.set(metadata);
         blob.set(new Uint8Array(cipher), metadata.length);
-        
         return blob;
-    },
+    }
+    
     async computeDigest(buffer) {
         const hash = await crypto.subtle.digest('SHA-256', buffer);
         return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('');
@@ -571,294 +527,169 @@ async encrypt(plainBytes) {
                     return;
                 }
             }
-            const fileName = h.name;
-            // Acquire lock (prompts only on first use per file)
-            const canWrite = await this.acquireLock(h, fileName);
             this.state.currentHandle = h;
             this.updateSaveButtonLabel();
+
             const file = await h.getFile();
-            
-            // Check file size to prevent OOM
-            const maxSizeBytes = APP_CONFIG.MAX_FILE_SIZE_MB * 1024 * 1024;
-            if (file.size > maxSizeBytes) {
-                document.getElementById('save-status').textContent = `⚠️ File too large (max ${APP_CONFIG.MAX_FILE_SIZE_MB}MB)`;
-                alert(`File is too large (${(file.size / 1024 / 1024).toFixed(1)}MB). Maximum supported size is ${APP_CONFIG.MAX_FILE_SIZE_MB}MB.`);
+            if (file.size > APP_CONFIG.MAX_FILE_SIZE_MB * 1024 * 1024) {
+                alert(`File too large (max ${APP_CONFIG.MAX_FILE_SIZE_MB}MB)`);
                 return;
             }
-            
+
             const buffer = await file.arrayBuffer();
-            const digest = await this.computeDigest(buffer);
-            this.state.lastMTime = file.lastModified;
-            this.state.lastDigest = digest;
-            this.state.lastDigestCheck = Date.now();
-            this.state.isDirty = false;
-            this.state.decryptionFailed = false;
-            
             const result = await this.getDecryptedText(new Uint8Array(buffer));
             const editor = document.getElementById('editor');
+
             if (result.success) {
                 this.state.decryptionFailed = false;
                 editor.value = new TextDecoder().decode(result.plainBytes);
                 this._setBaseContent(result.plainBytes);
-                document.getElementById('save-status').textContent = "Loaded from disk";
+                document.getElementById('save-status').textContent = "Loaded";
+
+                // Check lock after decrypt
+                const lockInfo = result.lockInfo;
+                if (lockInfo && !this.isLockOwnedOrStale(lockInfo)) {
+                    this._setReadOnly(true);
+                } else {
+                    await this.claimLockIfNeeded(); // auto-claim if stale/unlocked
+                    this._setReadOnly(false);
+                }
             } else {
                 this.state.decryptionFailed = true;
                 editor.value = result.errorMessage;
                 this._setBaseContent(null);
-                document.getElementById('save-status').textContent = "⚠️ Decryption failed — editing disabled";
+                this._setReadOnly(true, 'decryption failed');
+                document.getElementById('save-status').textContent = "⚠️ Decryption failed";
             }
-            this._setReadOnlyDueToLock(!canWrite);
-            // Use textContent to prevent XSS
             document.getElementById('active-filename').textContent = h.name;
             await this.renderList();
-            await this.setupLockPoller();
+            this.setupLockPoller();
         } catch (e) {
-            console.error('Error loading file:', e);
-            document.getElementById('save-status').textContent = "⚠️ Error loading file";
-            alert(`Failed to load file: ${e.message || 'Unknown error'}`);
+            console.error('Load failed:', e);
+            document.getElementById('save-status').textContent = "⚠️ Load error";
         }
     },
-    async save() {
-        if (!this.state.currentHandle || !this.state.key || this.state.decryptionFailed || this.state.syncInProgress) return;
+
+    async getDecryptedText(buffer) {
+        if (buffer.byteLength === 0) return { plainBytes: new Uint8Array(0), success: true, lockInfo: null };
+
+        if (buffer[0] < APP_CONFIG.FILE_FORMAT_VERSION - 1) { // too old
+            return { errorMessage: '### DECRYPTION ERROR ###\nUnsupported old format.', success: false };
+        }
+
+        const hasLockHeader = buffer[0] === APP_CONFIG.FILE_FORMAT_VERSION;
+        const headerSize = 1 + APP_CONFIG.SALT_LENGTH + APP_CONFIG.IV_LENGTH + (hasLockHeader ? APP_CONFIG.LOCK_HEADER_LENGTH : 0);
+        if (buffer.byteLength < headerSize + APP_CONFIG.GCM_TAG_LENGTH) {
+            return { errorMessage: '### DECRYPTION ERROR ###\nFile too short.', success: false };
+        }
+
+        const salt = buffer.slice(1, 1 + APP_CONFIG.SALT_LENGTH);
+        const iv = buffer.slice(1 + APP_CONFIG.SALT_LENGTH, 1 + APP_CONFIG.SALT_LENGTH + APP_CONFIG.IV_LENGTH);
+        let ciphertextStart = 1 + APP_CONFIG.SALT_LENGTH + APP_CONFIG.IV_LENGTH;
+        let lockInfo = null;
+
+        if (hasLockHeader) {
+            const lockStart = ciphertextStart;
+            const lockHeader = buffer.slice(lockStart, lockStart + APP_CONFIG.LOCK_HEADER_LENGTH);
+            const tsView = new DataView(lockHeader.buffer, lockHeader.byteOffset + 16, 8);
+            const ts = tsView.getBigUint64(0, true);
+            const released = lockHeader[24];
+            lockInfo = { uuidBytes: lockHeader.slice(0,16), ts: Number(ts), released: !!released };
+            ciphertextStart += APP_CONFIG.LOCK_HEADER_LENGTH;
+        }
+
+        const metadata = buffer.slice(0, ciphertextStart);
+        const ciphertext = buffer.slice(ciphertextStart);
+
         try {
-            // LOCK: Tell the observer to ignore the upcoming disk event
-            this.state.syncInProgress = true; 
-            const plainBytes = new TextEncoder().encode(document.getElementById('editor').value);
-            const encryptedBytes = await this.encrypt(plainBytes);
-            const stream = await this.state.currentHandle.createWritable();
-            await stream.write(encryptedBytes);
-            await stream.close();
-            // Update local metadata so we know what the "latest" version looks like
-            const digest = await this.computeDigest(encryptedBytes);
-            const f = await this.state.currentHandle.getFile();
-            this.state.lastMTime = f.lastModified;
-            this.state.lastDigest = digest;
-            this.state.lastDigestCheck = Date.now();
-            this.state.isDirty = false;
-            this._setBaseContent(plainBytes);
-            
-            document.getElementById('save-status').textContent = "✓ Encrypted & Saved";
+            const key = await this.deriveKeyFromSalt(salt);
+            const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv, additionalData: metadata }, key, ciphertext);
+            return { plainBytes: new Uint8Array(plain), success: true, lockInfo };
         } catch (e) {
-            console.error('Error saving file:', e);
-            document.getElementById('save-status').textContent = "⚠️ Error Saving";
-        } finally {
-            // UNLOCK: Allow the observer to listen for external changes again
-            // We use a small timeout to ensure the OS has finished flushing the write
-            setTimeout(() => { this.state.syncInProgress = false; }, 500);
+            return { errorMessage: '### DECRYPTION ERROR ###\nWrong secret or corrupted file.', success: false };
         }
     },
-    
-    async saveOrSaveAs() {
-        if (!this.state.key) {
-            document.getElementById('save-status').textContent = "⚠️ Session locked";
-            return;
+
+    isLockOwnedOrStale(lockInfo) {
+        if (!lockInfo) return true; // old file → unlocked
+        const ageMs = Date.now() - lockInfo.ts;
+        if (lockInfo.released || ageMs > APP_CONFIG.LOCK_STALE_MS) return true;
+        // compare uuid bytes
+        if (!this.state.sessionUuidBytes) return false;
+        for (let i = 0; i < 16; i++) {
+            if (lockInfo.uuidBytes[i] !== this.state.sessionUuidBytes[i]) return false;
         }
-        if (this.state.decryptionFailed) {
-            document.getElementById('save-status').textContent = "⚠️ Cannot save — file not decrypted";
-            return;
-        }
-        if (this.state.currentHandle) {
-            // File already exists, just save
-            await this.save();
-        } else {
-            // No file open, do Save As (create new note)
-            await this.createNote();
-        }
+        return true;
     },
-    async refreshFile() {
-        if (!this.state.currentHandle || !this.state.key) {
-            document.getElementById('save-status').textContent = "⚠️ No file to refresh";
-            return;
-        }
-        if (this.state.decryptionFailed) {
-            document.getElementById('save-status').textContent = "⚠️ Cannot refresh — file not decrypted";
-            return;
-        }
-        document.getElementById('save-status').textContent = "🔄 Refreshing from disk...";
-        // Reload the file content
+
+    async claimLockIfNeeded() {
+        if (!this.state.currentHandle) return;
         const file = await this.state.currentHandle.getFile();
         const buffer = await file.arrayBuffer();
         const result = await this.getDecryptedText(new Uint8Array(buffer));
-        if (result.success) {
-            document.getElementById('editor').value = new TextDecoder().decode(result.plainBytes);
-            this._setBaseContent(result.plainBytes);
+        if (!result.success || !result.lockInfo || this.isLockOwnedOrStale(result.lockInfo)) {
+            // safe to claim / refresh
+            await this.save(); // re-saves with fresh lock header (timestamp update)
+        }
+    },
+
+    async save() {
+        if (!this.state.currentHandle || !this.state.key || this.state.decryptionFailed) return;
+        try {
+            const plainBytes = new TextEncoder().encode(document.getElementById('editor').value);
+            const encrypted = await this.encrypt(plainBytes);
+            const stream = await this.state.currentHandle.createWritable();
+            await stream.write(encrypted);
+            await stream.close();
             this.state.isDirty = false;
-            document.getElementById('save-status').textContent = "✓ Refreshed from disk";
-        } else {
-            document.getElementById('save-status').textContent = "⚠️ Refresh failed — decryption error";
-        }
-    },
-    updateSaveButtonLabel() {
-        const saveBtn = document.getElementById('save-btn');
-        if (saveBtn) {
-            if (this.state.currentHandle) {
-                saveBtn.textContent = '💾 Save';
-                saveBtn.setAttribute('aria-label', 'Save current file');
-            } else {
-                saveBtn.textContent = '💾 Save As...';
-                saveBtn.setAttribute('aria-label', 'Save as new file');
-            }
-        }
-    },
-    // --- LOCK HELPERS ---
-    async getLockHandle(fileName) {
-        if (!this.state.db) return null;
-        return new Promise((resolve) => {
-            const tx = this.state.db.transaction('locks', 'readonly');
-            const req = tx.objectStore('locks').get(fileName);
-            req.onsuccess = () => resolve(req.result || null);
-            req.onerror = () => resolve(null);
-        });
-    },
-
-    async persistLock(fileName, lockHandle) {
-        if (!this.state.db) return;
-        const tx = this.state.db.transaction('locks', 'readwrite');
-        await new Promise((resolve, reject) => {
-            tx.onerror = () => reject(tx.error);
-            const req = tx.objectStore('locks').put(lockHandle, fileName);
-            req.onsuccess = () => resolve();
-        });
-    },
-
-    async deleteLockEntry(fileName) {
-        if (!this.state.db) return;
-        const tx = this.state.db.transaction('locks', 'readwrite');
-        await new Promise((resolve) => {
-            const req = tx.objectStore('locks').delete(fileName);
-            req.onsuccess = () => resolve();
-        });
-    },
-
-    async createLockFile(suggestedName) {
-        return window.showSaveFilePicker({
-            suggestedName,
-            types: [{ description: 'Lock file', accept: { 'application/json': ['.lock'] } }]
-        });
-    },
-
-    async writeLockData(lockHandle, data) {
-        const stream = await lockHandle.createWritable();
-        await stream.write(JSON.stringify(data));
-        await stream.close();
-    },
-
-    async checkLockStatus(lockHandle) {
-        try {
-            const file = await lockHandle.getFile();
-            const text = await file.text();
-            const data = JSON.parse(text);
-            const age = Date.now() - (data.timestamp || 0);
-
-            if (data.released || age > APP_CONFIG.LOCK_STALE_MS) {
-                return { available: true };
-            }
-            if (data.sessionId === this.state.sessionId) {
-                return { owned: true, timestamp: data.timestamp };
-            }
-            return { owned: false, ownerHint: data.sessionId ? 'another session' : 'unknown' };
+            this._setBaseContent(plainBytes);
+            document.getElementById('save-status').textContent = "✓ Saved";
         } catch (e) {
-            return { exists: false };
+            console.error('Save failed:', e);
+            document.getElementById('save-status').textContent = "⚠️ Save error";
         }
     },
 
-    async keepAliveLock(lockHandle) {
-        const data = {
-            sessionId: this.state.sessionId,
-            timestamp: Date.now(),
-            released: false
-        };
-        await this.writeLockData(lockHandle, data);
-    },
-
-    async releaseLock(lockHandle) {
-        if (!lockHandle) return;
-        try {
-            const data = {
-                sessionId: this.state.sessionId,
-                timestamp: 0,
-                released: true
-            };
-            await this.writeLockData(lockHandle, data);
-        } catch (e) {
-            console.warn('Failed to release lock (normal on abrupt close):', e);
-        }
-    },
-
-    async acquireLock(fileHandle, fileName) {
-        // Check stored lock first
-        let lockH = await this.getLockHandle(fileName);
-        if (lockH) {
-            const status = await this.checkLockStatus(lockH);
-            if (status.owned) {
-                await this.keepAliveLock(lockH);
-                this.state.currentLockHandle = lockH;
-                return true; // writable
-            } else if (status.available) {
-                // Reclaim stale/released lock
-                await this.writeLockData(lockH, {
-                    sessionId: this.state.sessionId,
-                    timestamp: Date.now(),
-                    released: false
-                });
-                this.state.currentLockHandle = lockH;
-                return true;
-            } else {
-                // Locked by other
-                this.state.currentLockHandle = lockH; // Still poll it
-                return false;
-            }
-        }
-
-        // First-time: prompt user to create lock file in same folder
-        try {
-            lockH = await this.createLockFile(fileName + APP_CONFIG.LOCK_SUFFIX);
-            await this.writeLockData(lockH, {
-                sessionId: this.state.sessionId,
-                timestamp: Date.now(),
-                released: false
-            });
-            await this.persistLock(fileName, lockH);
-            this.state.currentLockHandle = lockH;
-            this.showToast('Lock file created – only you can edit');
-            return true;
-        } catch (e) {
-            if (e.name !== 'AbortError') console.error('Lock creation failed:', e);
-            this._setReadOnlyDueToLock(true, 'lock creation aborted');
-            return false;
-        }
-    },
     async releaseCurrentLock() {
-        if (this.state.currentLockHandle) {
-            await this.releaseLock(this.state.currentLockHandle);
-            this.state.currentLockHandle = null;
+        if (!this.state.currentHandle || !this.state.key) return;
+        try {
+            const file = await this.state.currentHandle.getFile();
+            const buffer = await file.arrayBuffer();
+            const result = await this.getDecryptedText(new Uint8Array(buffer));
+            if (result.success) {
+                // re-encrypt with released=1, ts=0
+                const plainBytes = new TextEncoder().encode(document.getElementById('editor').value);
+                const encrypted = await this.encrypt(plainBytes, new Uint8Array(16), 0n, 1);
+                const stream = await this.state.currentHandle.createWritable();
+                await stream.write(encrypted);
+                await stream.close();
+            }
+        } catch (e) {
+            console.warn('Release lock failed (ok on close):', e);
         }
     },
+
     setupLockPoller() {
         this.teardownLockPoller();
-        if (!this.state.currentLockHandle) return;
         this.state.lockPollInterval = setInterval(async () => {
-            if (!this.state.currentLockHandle || this.state.syncInProgress) return;
-            const status = await this.checkLockStatus(this.state.currentLockHandle);
-            if (status.owned) {
-                await this.keepAliveLock(this.state.currentLockHandle);
-                this._setReadOnlyDueToLock(false);
-            } else if (status.available) {
-                // Auto-reclaim if stale during poll
-                await this.writeLockData(this.state.currentLockHandle, {
-                    sessionId: this.state.sessionId,
-                    timestamp: Date.now(),
-                    released: false
-                });
-                this._setReadOnlyDueToLock(false);
-            } else {
-                this._setReadOnlyDueToLock(true, status.ownerHint || 'another session');
-                // Optional: auto-backup if dirty
-                if (this.state.isDirty) {
-                    await this._storeBackup(this.state.currentHandle.name, document.getElementById('editor').value);
-                    this.showToast('Edits backed up – file now locked remotely');
-                    this.state.isDirty = false;
+            if (!this.state.currentHandle || this.state.decryptionFailed) return;
+            try {
+                const file = await this.state.currentHandle.getFile();
+                const headerBuffer = await file.slice(0, 1 + APP_CONFIG.SALT_LENGTH + APP_CONFIG.IV_LENGTH + APP_CONFIG.LOCK_HEADER_LENGTH).arrayBuffer();
+                const result = await this.getDecryptedText(new Uint8Array(headerBuffer)); // only header needed for lock check
+                if (result.lockInfo && !this.isLockOwnedOrStale(result.lockInfo)) {
+                    this._setReadOnly(true);
+                    if (this.state.isDirty) {
+                        // simple backup – can expand later
+                        this.state.isDirty = false;
+                        this.showToast('Edits discarded – file locked remotely');
+                    }
+                } else {
+                    await this.claimLockIfNeeded();
+                    this._setReadOnly(false);
                 }
+            } catch (e) {
+                console.warn('Lock poll failed:', e);
             }
         }, APP_CONFIG.LOCK_POLL_MS);
     },
@@ -869,6 +700,8 @@ async encrypt(plainBytes) {
             this.state.lockPollInterval = null;
         }
     },
+    
+    
     // --- DIFF / MERGE ---
     /**
      * Compute longest common subsequence length table for two arrays.
