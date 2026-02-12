@@ -500,6 +500,13 @@ async unlock() {
                 suggestedName: 'untitled.txt',
                 types: [{ accept: {'text/plain': ['.txt']} }]
             });
+            // Release the lock on the current file before switching to the new one
+            // so any waiting read-only sessions can auto-promote to editor.
+            // Done after picker succeeds so a cancelled dialog is a no-op.
+            if (this.state.currentHandle) {
+                await this.releaseCurrentLock();
+                this.broadcastLockRelease();
+            }
             if (this.state.key) {
                 const blob = await this.encrypt(new Uint8Array(0));
                 const stream = await h.createWritable();
@@ -562,6 +569,12 @@ async unlock() {
                     await this.persistHandle(h);
                     return;
                 }
+            }
+            // Release the lock on the previous file before switching handles
+            // so any waiting read-only sessions can auto-promote to editor.
+            if (this.state.currentHandle && this.state.currentHandle !== h) {
+                await this.releaseCurrentLock();
+                this.broadcastLockRelease();
             }
             // Persist handle unconditionally (even if file ends up read-only)
             await this.persistHandle(h);
@@ -749,7 +762,16 @@ async unlock() {
                         this.showToast('Edits discarded – file locked remotely');
                     }
                 } else if (this.state.isReadOnly) {
-                    // Lock released/stale – immediately claim and re-enable editor
+                    // Lock released/stale – re-read file for latest content,
+                    // then claim and re-enable editor. Refreshing baseContent
+                    // ensures diff3Merge stays accurate.
+                    const fullFile = await this.state.currentHandle.getFile();
+                    const fullBuffer = await fullFile.arrayBuffer();
+                    const result = await this.getDecryptedText(new Uint8Array(fullBuffer));
+                    if (result.success) {
+                        document.getElementById('editor').value = new TextDecoder().decode(result.plainBytes);
+                        this._setBaseContent(result.plainBytes);
+                    }
                     await this.claimLockIfNeeded();
                     this._setReadOnly(false);
                     this.showToast('Lock released – editing enabled');
@@ -775,12 +797,25 @@ async unlock() {
                 if (!this.state.currentHandle) return;
                 const msg = e.data;
                 if (msg.type === 'lock-released' && msg.filename === this.state.currentHandle.name) {
-                    // Another tab released the lock – immediately try to claim
+                    // Another tab released the lock – re-read file for latest
+                    // content, then claim and re-enable editor.
                     if (this.state.isReadOnly) {
-                        this.claimLockIfNeeded().then(() => {
-                            this._setReadOnly(false);
-                            this.showToast('Lock released by another tab – editing enabled');
-                        }).catch(() => {});
+                        (async () => {
+                            try {
+                                const file = await this.state.currentHandle.getFile();
+                                const buffer = await file.arrayBuffer();
+                                const result = await this.getDecryptedText(new Uint8Array(buffer));
+                                if (result.success) {
+                                    document.getElementById('editor').value = new TextDecoder().decode(result.plainBytes);
+                                    this._setBaseContent(result.plainBytes);
+                                }
+                                await this.claimLockIfNeeded();
+                                this._setReadOnly(false);
+                                this.showToast('Lock released by another tab – editing enabled');
+                            } catch (err) {
+                                console.warn('Broadcast claim failed:', err);
+                            }
+                        })();
                     }
                 }
             };
@@ -1068,11 +1103,21 @@ async unlock() {
         if (refreshBtn) refreshBtn.classList.toggle('hidden', !this.state.currentHandle);
     },
     async saveOrSaveAs() {
+        // Release the lock on the current file before switching to the new one
+        // so any waiting read-only sessions can auto-promote to editor.
+        const oldHandle = this.state.currentHandle;
         try {
             const h = await window.showSaveFilePicker({
                 suggestedName: this.state.currentHandle ? this.state.currentHandle.name : 'untitled.txt',
                 types: [{ accept: {'text/plain': ['.txt']} }]
             });
+            // Release old lock before writing to the new file.
+            // Done after picker succeeds but before switching handles,
+            // so the release still targets the previous file.
+            if (oldHandle) {
+                await this.releaseCurrentLock();
+                this.broadcastLockRelease();
+            }
             const plainBytes = new TextEncoder().encode(document.getElementById('editor').value);
             const encrypted = await this.encrypt(plainBytes);
             const stream = await h.createWritable();
@@ -1085,6 +1130,8 @@ async unlock() {
             this._setBaseContent(plainBytes);
             document.getElementById('active-filename').textContent = h.name;
             document.getElementById('save-status').textContent = '✓ Saved';
+            // Restart lock poller for the new file
+            this.setupLockPoller();
             await this.renderList();
         } catch (e) {
             if (e.name !== 'AbortError') {
