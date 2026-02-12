@@ -163,6 +163,8 @@ const APP_CONFIG = {
     LOCK_POLL_READONLY_MS: 4000,   // 4 s – fast poll (read-only)
     LOCK_HEARTBEAT_MS: 5 * 60 * 1000, // 5 min – heartbeat to keep lock alive
 };
+// Derived: total header size (version + salt + iv + lock header)
+APP_CONFIG.FULL_HEADER_SIZE = 1 + APP_CONFIG.SALT_LENGTH + APP_CONFIG.IV_LENGTH + APP_CONFIG.LOCK_HEADER_LENGTH;
 
 const App = {
     state: {
@@ -698,8 +700,8 @@ async unlock() {
     readLockInfoFromRawHeader(buffer) {
         if (!buffer || buffer.byteLength === 0) return null;
         if (buffer[0] !== APP_CONFIG.FILE_FORMAT_VERSION) return null; // no lock header
+        if (buffer.byteLength < APP_CONFIG.FULL_HEADER_SIZE) return null;
         const lockStart = 1 + APP_CONFIG.SALT_LENGTH + APP_CONFIG.IV_LENGTH;
-        if (buffer.byteLength < lockStart + APP_CONFIG.LOCK_HEADER_LENGTH) return null;
         const lockHeader = buffer.slice(lockStart, lockStart + APP_CONFIG.LOCK_HEADER_LENGTH);
         const tsView = new DataView(lockHeader.buffer, lockHeader.byteOffset + 16, 8);
         const ts = tsView.getBigUint64(0, true);
@@ -753,7 +755,7 @@ async unlock() {
             // Skip when forceClaim is true (explicit user take-over)
             if (!forceClaim) {
                 const file = await this.state.currentHandle.getFile();
-                const headerBuffer = await file.slice(0, 1 + APP_CONFIG.SALT_LENGTH + APP_CONFIG.IV_LENGTH + APP_CONFIG.LOCK_HEADER_LENGTH).arrayBuffer();
+                const headerBuffer = await file.slice(0, APP_CONFIG.FULL_HEADER_SIZE).arrayBuffer();
                 const lockInfo = this.readLockInfoFromRawHeader(new Uint8Array(headerBuffer));
                 if (lockInfo && !this.isLockOwnedOrStale(lockInfo)) {
                     // Another session claimed the lock – demote to read-only
@@ -805,7 +807,7 @@ async unlock() {
             if (!this.state.currentHandle || this.state.decryptionFailed) return;
             try {
                 const file = await this.state.currentHandle.getFile();
-                const headerBuffer = await file.slice(0, 1 + APP_CONFIG.SALT_LENGTH + APP_CONFIG.IV_LENGTH + APP_CONFIG.LOCK_HEADER_LENGTH).arrayBuffer();
+                const headerBuffer = await file.slice(0, APP_CONFIG.FULL_HEADER_SIZE).arrayBuffer();
                 const lockInfo = this.readLockInfoFromRawHeader(new Uint8Array(headerBuffer));
                 if (lockInfo && !this.isLockOwnedOrStale(lockInfo)) {
                     if (!this.state.isReadOnly) {
@@ -1234,7 +1236,7 @@ async unlock() {
         // a read-only user from inadvertently claiming the lock
         try {
             const file = await this.state.currentHandle.getFile();
-            const headerBuffer = await file.slice(0, 1 + APP_CONFIG.SALT_LENGTH + APP_CONFIG.IV_LENGTH + APP_CONFIG.LOCK_HEADER_LENGTH).arrayBuffer();
+            const headerBuffer = await file.slice(0, APP_CONFIG.FULL_HEADER_SIZE).arrayBuffer();
             const lockInfo = this.readLockInfoFromRawHeader(new Uint8Array(headerBuffer));
             if (lockInfo && !this.isLockOwnedOrStale(lockInfo)) {
                 // Another session holds the lock – reload content read-only
