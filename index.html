@@ -147,6 +147,7 @@ const APP_CONFIG = {
     SALT_LENGTH: 16,
     IV_LENGTH: 12,
     LOCK_HEADER_LENGTH: 32,     // 16 uuid + 8 ts + 1 released + 7 pad
+    GCM_TAG_LENGTH: 16,         // AES-GCM authentication tag (128 bits)
     PBKDF2_ITERATIONS: 600000,
     AUTO_SAVE_DELAY_MS: 1000,
     INACTIVITY_TIMEOUT_MS: 10 * 60 * 1000,
@@ -453,7 +454,7 @@ async unlock() {
         blob.set(metadata);
         blob.set(new Uint8Array(cipher), metadata.length);
         return blob;
-    }
+    },
     
     async computeDigest(buffer) {
         const hash = await crypto.subtle.digest('SHA-256', buffer);
@@ -923,34 +924,52 @@ async unlock() {
             list.appendChild(p);
         }
     },
-    async getDecryptedText(buffer) {
-        if (buffer.byteLength === 0) {
-            return {plainBytes: new Uint8Array(0), success: true};
-        }
-        if (buffer.byteLength < 1 + APP_CONFIG.SALT_LENGTH + APP_CONFIG.IV_LENGTH + APP_CONFIG.GCM_TAG_LENGTH) {
-            return {errorMessage: '### DECRYPTION ERROR ###\nInvalid file format.', success: false};
-        }
-        if (buffer[0] !== APP_CONFIG.FILE_FORMAT_VERSION) {
-            return {errorMessage: '### DECRYPTION ERROR ###\nUnsupported file format version.', success: false};
-        }
-        const salt = buffer.slice(1, 1 + APP_CONFIG.SALT_LENGTH);
-        const saltArray = new Uint8Array(salt);
-        let key;
+    // --- SAVE / REFRESH ---
+    updateSaveButtonLabel() {
+        const btn = document.getElementById('save-btn');
+        if (!btn) return;
+        btn.textContent = this.state.currentHandle
+            ? `💾 Save As...`
+            : `💾 Save As...`;
+        const refreshBtn = document.getElementById('refresh-btn');
+        if (refreshBtn) refreshBtn.classList.toggle('hidden', !this.state.currentHandle);
+    },
+    async saveOrSaveAs() {
         try {
-            key = await this.deriveKeyFromSalt(saltArray);
+            const h = await window.showSaveFilePicker({
+                suggestedName: this.state.currentHandle ? this.state.currentHandle.name : 'untitled.txt',
+                types: [{ accept: {'text/plain': ['.txt']} }]
+            });
+            const plainBytes = new TextEncoder().encode(document.getElementById('editor').value);
+            const encrypted = await this.encrypt(plainBytes);
+            const stream = await h.createWritable();
+            await stream.write(encrypted);
+            await stream.close();
+            await this.persistHandle(h);
+            this.state.currentHandle = h;
+            this.updateSaveButtonLabel();
+            this.state.isDirty = false;
+            this._setBaseContent(plainBytes);
+            document.getElementById('active-filename').textContent = h.name;
+            document.getElementById('save-status').textContent = '✓ Saved';
+            await this.renderList();
         } catch (e) {
-            return {errorMessage: '### DECRYPTION ERROR ###\nFailed to derive key.', success: false};
+            if (e.name !== 'AbortError') {
+                document.getElementById('save-status').textContent = '⚠️ Save failed';
+            }
         }
-        const iv = buffer.slice(1 + APP_CONFIG.SALT_LENGTH, 1 + APP_CONFIG.SALT_LENGTH + APP_CONFIG.IV_LENGTH);
-        const ciphertext = buffer.slice(1 + APP_CONFIG.SALT_LENGTH + APP_CONFIG.IV_LENGTH);
-        // Build metadata buffer [Version][Salt][IV] for GCM additional authenticated data
-        const metadata = buffer.slice(0, 1 + APP_CONFIG.SALT_LENGTH + APP_CONFIG.IV_LENGTH);
-        try {
-            const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv, additionalData: metadata }, key, ciphertext);
-            return {plainBytes: new Uint8Array(plain), success: true};
-        } catch (e) {
-            return {errorMessage: '### DECRYPTION ERROR ###\nUnable to decrypt file. Please verify your password is correct.', success: false};
+    },
+    async refreshFile() {
+        if (!this.state.currentHandle) {
+            this.showToast('No file selected to refresh');
+            return;
         }
+        await this.loadFile(this.state.currentHandle);
+        this.showToast('File refreshed from disk');
+    },
+    async deleteLockEntry(name) {
+        // Lock info is embedded in the encrypted file header, not stored separately.
+        // No additional cleanup is needed when removing a file handle from the sidebar.
     }
 };
 const arraysEqual = (a, b) => {
