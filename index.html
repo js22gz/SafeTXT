@@ -124,7 +124,10 @@
 
     <main>
         <header>
-            <div id="active-filename" style="font-weight: 600; font-size: 16px;">No file selected</div>
+            <div style="display: flex; align-items: center; gap: 10px;">
+                <div id="active-filename" style="font-weight: 600; font-size: 16px;">No file selected</div>
+                <span id="readonly-badge" class="hidden" style="background: var(--danger); color: #fff; font-size: 12px; font-weight: 700; padding: 2px 10px; border-radius: 4px; letter-spacing: 0.5px;">READ ONLY</span>
+            </div>
             <div id="save-status" style="font-size: 12px; color: var(--text-sub)">Ready</div>
         </header>
         <textarea id="editor" placeholder="Select a note or create one to begin..." disabled></textarea>
@@ -188,14 +191,20 @@ const App = {
     _setReadOnly(readOnly, reason = '') {
         const editor = document.getElementById('editor');
         const status = document.getElementById('save-status');
+        const badge = document.getElementById('readonly-badge');
+        const filename = document.getElementById('active-filename');
         if (readOnly) {
             editor.disabled = true;
             clearTimeout(this.state.saveTimeout);
             status.textContent = `👁️ Locked${reason ? ' by ' + reason : ''} – read-only`;
+            if (badge) badge.classList.remove('hidden');
+            if (filename) filename.style.color = 'var(--danger)';
             this.showToast('File is locked by another session', 5000);
         } else {
             editor.disabled = !this.state.key || this.state.decryptionFailed;
             status.textContent = this.state.key ? 'Editing enabled' : 'Session Active';
+            if (badge) badge.classList.add('hidden');
+            if (filename) filename.style.color = '';
         }
     },
     async init() {
@@ -623,6 +632,22 @@ async unlock() {
         return true;
     },
 
+    /**
+     * Read lock info directly from the raw file header without needing to decrypt.
+     * The lock header is stored in plaintext: [version(1)] [salt(16)] [iv(12)] [lock_header(32)]
+     */
+    readLockInfoFromRawHeader(buffer) {
+        if (!buffer || buffer.byteLength === 0) return null;
+        if (buffer[0] !== APP_CONFIG.FILE_FORMAT_VERSION) return null; // no lock header
+        const lockStart = 1 + APP_CONFIG.SALT_LENGTH + APP_CONFIG.IV_LENGTH;
+        if (buffer.byteLength < lockStart + APP_CONFIG.LOCK_HEADER_LENGTH) return null;
+        const lockHeader = buffer.slice(lockStart, lockStart + APP_CONFIG.LOCK_HEADER_LENGTH);
+        const tsView = new DataView(lockHeader.buffer, lockHeader.byteOffset + 16, 8);
+        const ts = tsView.getBigUint64(0, true);
+        const released = lockHeader[24];
+        return { uuidBytes: lockHeader.slice(0, 16), ts: Number(ts), released: !!released };
+    },
+
     async claimLockIfNeeded() {
         if (!this.state.currentHandle) return;
         const file = await this.state.currentHandle.getFile();
@@ -677,11 +702,10 @@ async unlock() {
             try {
                 const file = await this.state.currentHandle.getFile();
                 const headerBuffer = await file.slice(0, 1 + APP_CONFIG.SALT_LENGTH + APP_CONFIG.IV_LENGTH + APP_CONFIG.LOCK_HEADER_LENGTH).arrayBuffer();
-                const result = await this.getDecryptedText(new Uint8Array(headerBuffer)); // only header needed for lock check
-                if (result.lockInfo && !this.isLockOwnedOrStale(result.lockInfo)) {
+                const lockInfo = this.readLockInfoFromRawHeader(new Uint8Array(headerBuffer));
+                if (lockInfo && !this.isLockOwnedOrStale(lockInfo)) {
                     this._setReadOnly(true);
                     if (this.state.isDirty) {
-                        // simple backup – can expand later
                         this.state.isDirty = false;
                         this.showToast('Edits discarded – file locked remotely');
                     }
@@ -874,11 +898,27 @@ async unlock() {
     },
     async renderList() {
         const list = document.getElementById('file-list');
+        // Try to reopen DB if it was closed or not yet initialized
+        if (!this.state.db) {
+            try {
+                this.state.db = await new Promise((resolve, reject) => {
+                    const req = indexedDB.open(APP_CONFIG.DB_NAME, APP_CONFIG.DB_VERSION);
+                    req.onupgradeneeded = (e) => {
+                        const db = e.target.result;
+                        if (!db.objectStoreNames.contains('handles')) db.createObjectStore('handles');
+                    };
+                    req.onsuccess = () => resolve(req.result);
+                    req.onerror = () => reject(req.error);
+                });
+            } catch (e) {
+                console.warn('DB reopen failed:', e);
+            }
+        }
         if (!this.state.db) {
             list.textContent = '';
             const p = document.createElement('p');
             p.style.color = 'var(--text-sub)';
-            p.textContent = 'Local storage unavailable';
+            p.textContent = 'File list unavailable – browser storage is blocked or unsupported';
             list.appendChild(p);
             return;
         }
@@ -963,6 +1003,22 @@ async unlock() {
         if (!this.state.currentHandle) {
             this.showToast('No file selected to refresh');
             return;
+        }
+        // Check lock from raw header before full reload to prevent
+        // a read-only user from inadvertently claiming the lock
+        try {
+            const file = await this.state.currentHandle.getFile();
+            const headerBuffer = await file.slice(0, 1 + APP_CONFIG.SALT_LENGTH + APP_CONFIG.IV_LENGTH + APP_CONFIG.LOCK_HEADER_LENGTH).arrayBuffer();
+            const lockInfo = this.readLockInfoFromRawHeader(new Uint8Array(headerBuffer));
+            if (lockInfo && !this.isLockOwnedOrStale(lockInfo)) {
+                // Another session holds the lock – reload content read-only
+                await this.loadFile(this.state.currentHandle);
+                this._setReadOnly(true);
+                this.showToast('File refreshed (read-only – locked by another session)');
+                return;
+            }
+        } catch (e) {
+            console.warn('Lock pre-check failed during refresh:', e);
         }
         await this.loadFile(this.state.currentHandle);
         this.showToast('File refreshed from disk');
